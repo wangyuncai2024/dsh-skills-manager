@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+## 1.1.14 - 2026-10-09
+
+This release supports DeepSeek Harness `0.2.1-alpha.2`. Previously supported versions remain available.
+
+- Fix the plugin being rejected by the host compatibility gate after a DSH upgrade. The seven official peers declared an enumerated list of versions, so every new host release invalidated the whole declaration (recurring three times since 1.1.8: `0.2.1-alpha.1` and `0.2.1-alpha.2`). The range is now `>=0.1.2-rc.1 <1.0.0`, so all of DSH 0.x including prereleases loads; `1.0.0` may bring breaking changes and still needs review before widening.
+- Fix the plugin staying `pending` with a 404 settings API on `0.2.1-alpha.2`. That release removed the `webRuntime` service and moved `trustedHosts` to the `connection` service; the plugin required it via `inject`, so it waited forever for a service that no longer exists. It no longer injects either service and reads them optionally per request, working on both host generations.
+- Compatibility installs now derive the Cordis pin from version thresholds, so an unlisted newer host follows its own Cordis line instead of falling back to an outdated `4.0.2` that makes the host exit before the compatibility check connects.
+- The README compatibility note now states the accepted range and the actually verified versions separately.
+
 ## 1.1.13 - 2026-10-07
 
 - Repository installs can go to DSH skills or Shared Agent. Codex, Claude and other agent directories stay read-only.

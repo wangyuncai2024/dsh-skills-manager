@@ -36,6 +36,14 @@ export interface Agent {
 }
 interface Services {
     sessions: Sessions;
+    /** DSH ≥ 0.2.1-alpha.2：承接原 webRuntime 的部署信任列表。 */
+    connection: {
+        trustedHosts?: string[];
+    };
+    /** DSH ≤ 0.2.0 的提供方；0.2.1-alpha.2 起不存在。 */
+    webRuntime: {
+        trustedHosts?: string[];
+    };
     agents: {
         list: () => Agent[];
     };
@@ -57,7 +65,8 @@ export interface HostContext {
     get?: <K extends keyof Services>(key: K) => Services[K] | undefined;
     sessions?: Sessions;
     skills: Skills;
-    webRuntime: {
+    /** DSH ≤ 0.2.0 提供；0.2.1-alpha.2 起移除，trustedHosts 改由 connection 服务提供。 */
+    webRuntime?: {
         trustedHosts?: string[];
     };
     webServer: {

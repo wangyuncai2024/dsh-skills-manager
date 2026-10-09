@@ -32,7 +32,9 @@ import { registerPluginUpdater } from "./plugin-updater.js";
 import { createRepositoryManager } from "./repositories.js";
 
 const name = "skills-manager";
-const inject = ["webServer", "webRuntime", "skills", "tools", "sessions"];
+// webRuntime 在 DSH 0.2.1-alpha.2 起已移除，trustedHosts 迁到 connection 服务。
+// 两者都用 ctx.get 可选读取（见 resolveTrustedHosts），不能让 inject 卡住整个插件。
+const inject = ["webServer", "skills", "tools", "sessions"];
 const CLIENT_MARKER_HEADER = "x-dsh-skills-manager";
 const MAX_LOG_BYTES = 1 << 20;
 // 文件夹上传允许 64 MiB 原始内容；Base64 会膨胀约 1/3，再为最多 1000 条路径预留余量。
@@ -139,6 +141,36 @@ function isTrustedAuthority(hostUrl: URL, trustedHosts: string[]) {
       ? entryUrl.hostname === hostUrl.hostname
       : entryUrl.host === hostUrl.host;
   });
+}
+
+/**
+ * 读取宿主信任的 Host 列表，跨版本兼容两种提供方：
+ * - DSH ≤ 0.2.0：`webRuntime.trustedHosts`
+ * - DSH ≥ 0.2.1-alpha.2：`connection.trustedHosts`（webRuntime 已移除）
+ * 优先用 ctx.get 可选读取；直接访问属性在未 inject 时会抛
+ * "cannot get property ... without inject"，因此两条路径都做保护。
+ * 服务缺失时退回空列表：loopback 仍然放行，不会放宽安全边界。
+ * 每次请求现读而不缓存：本插件不再 inject 这两个服务，启动时它们未必已经激活。
+ */
+function resolveTrustedHosts(ctx: HostContext): string[] {
+  const read = (name: "connection" | "webRuntime") => {
+    try {
+      const viaGet = ctx.get?.(name);
+      if (viaGet) return viaGet as { trustedHosts?: unknown };
+    } catch {
+      // 未 inject 的服务在部分宿主版本上会抛错；继续尝试属性访问。
+    }
+    try {
+      return (ctx as unknown as Record<string, { trustedHosts?: unknown } | undefined>)[name];
+    } catch {
+      return undefined;
+    }
+  };
+  for (const name of ["connection", "webRuntime"] as const) {
+    const value = read(name)?.trustedHosts;
+    if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
+  }
+  return [];
 }
 
 /**
@@ -328,7 +360,8 @@ function apply(ctx: HostContext) {
   }), "skills-manager: plugin updater");
   const log = makeLog();
   const repositories = createRepositoryManager({ log });
-  const trustedHosts = Array.isArray(ctx.webRuntime.trustedHosts) ? ctx.webRuntime.trustedHosts : [];
+  // 每次请求现读，避免在 connection 激活之前就把信任列表固化下来。
+  const trustedHosts = () => resolveTrustedHosts(ctx);
   const roots = userRoots();
   const rootByKey = Object.fromEntries(roots.map((r) => [r.key, r]));
 
@@ -404,7 +437,7 @@ function apply(ctx: HostContext) {
         return snapshot;
       };
       try {
-        const hostError = validateRequestOrigin(req, trustedHosts);
+        const hostError = validateRequestOrigin(req, trustedHosts());
         if (hostError) {
           json(res, hostError.statusCode, { ok: false, code: hostError.code, error: hostError.error });
           return;
@@ -425,7 +458,7 @@ function apply(ctx: HostContext) {
           json(res, 405, { ok: false, code: "error.proto.method", error: `method not allowed: ${req.method}` });
           return;
         }
-        const requestError = validateMutationRequest(req, trustedHosts);
+        const requestError = validateMutationRequest(req, trustedHosts());
         if (requestError) {
           json(res, requestError.statusCode, { ok: false, code: requestError.code, error: requestError.error });
           return;

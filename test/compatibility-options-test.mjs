@@ -20,15 +20,23 @@ assert.equal(cordisPin("0.1.7-rc.1"), "4.0.4");
 assert.equal(cordisPin("0.1.7-rc.2"), "4.0.4");
 assert.equal(cordisPin("0.2.0-rc.1"), "4.0.4");
 assert.equal(cordisPin("0.2.0-rc.2"), "4.0.4");
+// 阈值推导：未登记的较新宿主必须跟随所属 Cordis 线，而不是回退到过旧的 4.0.2。
+assert.equal(cordisPin("0.2.1-alpha.1"), "4.0.5-alpha.1");
+assert.equal(cordisPin("0.2.1-alpha.2"), "4.0.5-alpha.1");
+assert.equal(cordisPin("0.2.5"), "4.0.5-alpha.1");
+assert.equal(cordisPin("0.4.0-rc.1"), "4.0.5-alpha.1");
 assert.equal(hostCordisOverrides("0.1.1-rc.2")["@deepseek-ai/cordis-plugin-hmr"], "1.0.17");
 assert.equal(hostCordisOverrides("0.1.1-rc.2")["@deepseek-ai/cordis-plugin-timer"], "1.1.4");
 assert.equal(hostCordisOverrides("0.1.7-rc.1")["@deepseek-ai/cordis-plugin-hmr"], "1.0.19");
 assert.equal(hostCordisOverrides("0.1.7-rc.2")["@deepseek-ai/cordis-plugin-hmr"], "1.0.19");
 assert.equal(hostCordisOverrides("0.2.0-rc.1")["@deepseek-ai/cordis-plugin-hmr"], "1.0.19");
 assert.equal(hostCordisOverrides("0.2.0-rc.2")["@deepseek-ai/cordis-plugin-hmr"], "1.0.19");
-assert.equal(developmentHost, "0.2.0-rc.2");
-assert.deepEqual(supportedHosts, ["0.1.2-rc.1", "0.1.5-rc.1", "0.1.5-rc.2", "0.1.5-rc.3", "0.1.7-rc.1", "0.1.7-rc.2", "0.2.0-rc.1", "0.2.0-rc.2"]);
-assert.equal(supportedHosts.some((version) => version.includes("alpha")), false);
+assert.equal(hostCordisOverrides("0.2.1-alpha.1")["@deepseek-ai/cordis"], "4.0.5-alpha.1");
+assert.equal(hostCordisOverrides("0.2.1-alpha.1")["@deepseek-ai/cordis-plugin-hmr"], "1.0.20-alpha.1");
+assert.equal(hostCordisOverrides("0.2.1-alpha.2")["@deepseek-ai/cordis"], "4.0.5-alpha.1");
+assert.equal(cordisPin(developmentHost), "4.0.5-alpha.1");
+assert.equal(developmentHost, "0.2.1-alpha.2");
+assert.deepEqual(supportedHosts, ["0.1.2-rc.1", "0.1.5-rc.1", "0.1.5-rc.2", "0.1.5-rc.3", "0.1.7-rc.1", "0.1.7-rc.2", "0.2.0-rc.1", "0.2.0-rc.2", "0.2.1-alpha.1", "0.2.1-alpha.2"]);
 assert.deepEqual(parseOptions(["--keep"]).versions, supportedHosts);
 assert.equal(parseOptions(["--keep", supportedHosts[0]]).keep, true);
 assert.deepEqual(parseOptions([supportedHosts[0], "--keep"]).versions, [supportedHosts[0]]);
@@ -45,7 +53,22 @@ assertHostPeers(manifest.peerDependencies);
 for (const [name, range] of Object.entries(manifest.peerDependencies)) {
   if (name.startsWith("@deepseek-ai/dsh-")) assert.equal(range, peerRange, name);
 }
-assert.equal(manifest.devDependencies["@deepseek-ai/cordis"], "4.0.4");
+// 核心防复发回归：peer 范围必须是区间，未来宿主版本不能被兼容门拒绝。
+// 否则每出一个新的 DSH 版本，宿主就会整体跳过本组合包（1.1.8 起连续复发三次）。
+const semver = (await import("semver")).default;
+assert.match(peerRange, /^>=/, "peer 范围必须是区间；枚举式范围会随新宿主版本失效");
+for (const future of ["0.2.1-alpha.2", "0.2.2-alpha.1", "0.2.5", "0.3.0-rc.1", "0.9.9"]) {
+  assert.equal(semver.satisfies(future, peerRange, { includePrerelease: true }), true, `${future} 不应被兼容门拒绝`);
+}
+// 已淘汰与破坏性大版本仍必须被拒绝。
+for (const rejected of ["0.1.0-rc.8", "1.0.0", "1.1.0"]) {
+  assert.equal(semver.satisfies(rejected, peerRange, { includePrerelease: true }), false, `${rejected} 不应被放行`);
+}
+// 每个受支持宿主都必须真的落在声明范围内，避免清单与范围脱节。
+for (const host of supportedHosts) {
+  assert.equal(semver.satisfies(host, peerRange, { includePrerelease: true }), true, `${host} 在受支持清单内却不在声明范围内`);
+}
+assert.equal(manifest.devDependencies["@deepseek-ai/cordis"], cordisPin(developmentHost));
 for (const [name, version] of Object.entries(manifest.devDependencies)) {
   if (name.startsWith("@deepseek-ai/dsh-")) assert.equal(version, developmentHost, name);
 }
