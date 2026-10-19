@@ -6,6 +6,11 @@ const CORDIS_LINES = Object.freeze([
   { since: "0.1.7-rc.1", cordis: "4.0.4" },
   { since: "0.0.0-0", cordis: "4.0.2" },
 ]);
+// schemastery 也要按阈值钉版：0.2.1-alpha.1/alpha.2 的宿主契约要求 3.18.5-alpha.1，
+// 让它浮动会解析到更新的 3.x 并在宿主启动阶段失败。未列出的宿主不加 override。
+const SCHEMASTERY_LINES = Object.freeze([
+  { since: "0.2.1-alpha.1", before: "0.2.1-alpha.3", schemastery: "3.18.5-alpha.1" },
+]);
 const CORDIS_PLUGIN_PINS = Object.freeze({
   "4.0.2": {
     "@deepseek-ai/cordis-plugin-group": "1.0.2",
@@ -45,9 +50,27 @@ export function cordisPin(hostVersion) {
   return CORDIS_LINES[CORDIS_LINES.length - 1].cordis;
 }
 
+/** 缺 pin 表时直接失败：静默展开 undefined 会让宿主用错 Cordis 插件线。 */
+export function pluginPins(cordis) {
+  const plugins = CORDIS_PLUGIN_PINS[cordis];
+  if (!plugins) throw new Error(`缺少 ${cordis} 的插件 pin`);
+  return plugins;
+}
+
+function schemasteryPin(hostVersion) {
+  for (const line of SCHEMASTERY_LINES) {
+    if (compareVersions(hostVersion, line.since) >= 0 && compareVersions(hostVersion, line.before) < 0)
+      return line.schemastery;
+  }
+  return undefined;
+}
+
 export function hostCordisOverrides(hostVersion) {
   const cordis = cordisPin(hostVersion);
-  return { "@deepseek-ai/cordis": cordis, ...CORDIS_PLUGIN_PINS[cordis] };
+  const overrides = { "@deepseek-ai/cordis": cordis, ...pluginPins(cordis) };
+  const schemastery = schemasteryPin(hostVersion);
+  if (schemastery) overrides["@deepseek-ai/schemastery"] = schemastery;
+  return overrides;
 }
 
 // pnpm 的包名通配 override 不保证匹配传递依赖；在解析每个包时锁定官方依赖。

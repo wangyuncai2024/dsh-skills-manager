@@ -37,6 +37,10 @@ else
     manifest,
     "package.json 与 hosts.mjs 不一致；运行 node scripts/sync-hosts.mjs --write",
   );
+// 徽章和"本文对应哪个版本"两行同样要跟清单/版本号同步，
+// 否则发布后 README 会长期停在旧宿主版本上。
+const latestHost = supportedHosts.at(-1);
+const shieldsHost = latestHost.replace(/(\d)-/g, "$1--");
 for (const [file, pattern, line] of [
   [
     "README.md",
@@ -47,6 +51,26 @@ for (const [file, pattern, line] of [
     "README.zh-CN.md",
     /^- `[^`]+` (?:已验证兼容|接受) DeepSeek Harness .*$/m,
     `- \`${manifest.version}\` 接受 DeepSeek Harness \`${peerRange}\`，并已验证 ${supportedHosts.map((v) => "`" + v + "`").join("、")}。`,
+  ],
+  [
+    "README.md",
+    /^This README describes \*\*[^*]+\*\*\. See the \[changelog\]\(CHANGELOG\.md\).*$/m,
+    `This README describes **${manifest.version}**. See the [changelog](CHANGELOG.md) and [release notes](https://github.com/MichengAI/dsh-skills-manager/releases/latest).`,
+  ],
+  [
+    "README.zh-CN.md",
+    /^本文对应 \*\*[^*]+\*\*。完整变更见\[更新日志\]\(CHANGELOG\.zh-CN\.md\).*$/m,
+    `本文对应 **${manifest.version}**。完整变更见[更新日志](CHANGELOG.zh-CN.md)与[最新发行说明](https://github.com/MichengAI/dsh-skills-manager/releases/latest)。`,
+  ],
+  [
+    "README.md",
+    /^  \[!\[DSH supported through [^\[]+\]\(https:\/\/img\.shields\.io\/badge\/DSH-up%20to%20[^)]+\)\]\(#installation\)$/m,
+    `  [![DSH supported through ${latestHost}](https://img.shields.io/badge/DSH-up%20to%20${shieldsHost}-2563eb.svg)](#installation)`,
+  ],
+  [
+    "README.zh-CN.md",
+    /^  \[!\[DSH 支持至 [^\[]+\]\(https:\/\/img\.shields\.io\/badge\/DSH-%E6%94%AF%E6%8C%81%E8%87%B3%20[^)]+\)\]\(#安装\)$/m,
+    `  [![DSH 支持至 ${latestHost}](https://img.shields.io/badge/DSH-%E6%94%AF%E6%8C%81%E8%87%B3%20${shieldsHost}-2563eb.svg)](#安装)`,
   ],
 ]) {
   const url = new URL("../" + file, import.meta.url);

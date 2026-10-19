@@ -14,12 +14,12 @@
   [![npm package](https://img.shields.io/npm/v/%40michengai%2Fdsh-skills-manager.svg?label=npm%20package)](https://www.npmjs.com/package/@michengai/dsh-skills-manager)
   [![npm 下载量](https://img.shields.io/npm/dt/%40michengai%2Fdsh-skills-manager.svg?label=npm%20%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://www.npmjs.com/package/@michengai/dsh-skills-manager)
   [![DSH Web Plugin](https://img.shields.io/badge/DSH%20Web-Plugin-0f766e.svg)](https://github.com/MichengAI/dsh-skills-manager)
-  [![DSH 支持至 0.2.0-rc.2](https://img.shields.io/badge/DSH-%E6%94%AF%E6%8C%81%E8%87%B3%200.2.0--rc.2-2563eb.svg)](#安装)
+  [![DSH 支持至 0.2.1-alpha.2](https://img.shields.io/badge/DSH-%E6%94%AF%E6%8C%81%E8%87%B3%200.2.1--alpha.2-2563eb.svg)](#安装)
 </div>
 
 > DSH Skills Manager 是社区维护的 DeepSeek Harness（DSH）插件，并非 DeepSeek AI 官方产品。
 
-本文对应 **1.1.13**。完整变更见[更新日志](CHANGELOG.zh-CN.md)与[最新发行说明](https://github.com/MichengAI/dsh-skills-manager/releases/latest)。
+本文对应 **1.1.14**。完整变更见[更新日志](CHANGELOG.zh-CN.md)与[最新发行说明](https://github.com/MichengAI/dsh-skills-manager/releases/latest)。
 
 ## 功能概览
 

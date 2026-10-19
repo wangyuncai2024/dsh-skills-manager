@@ -8,7 +8,7 @@ import { mkdtemp, readdir, rm, readFile } from "node:fs/promises";
 import { parseOptions } from "../scripts/compatibility-options.mjs";
 import { sameExistingPath, resolveTempRoot } from "../scripts/compat-paths.mjs";
 import { assertHostPeers, supportedHosts, peerRange, developmentHost } from "../scripts/hosts.mjs";
-import { cordisPin, hostCordisOverrides, pinHostDependencies } from "../scripts/compat-dependencies.mjs";
+import { cordisPin, hostCordisOverrides, pinHostDependencies, pluginPins } from "../scripts/compat-dependencies.mjs";
 const mixed = { dependencies: { "@deepseek-ai/dsh-app-boot": "^0.1.6-alpha.1", other: "^2" }, peerDependencies: { "@deepseek-ai/dsh-base": "*" } };
 const pinned = pinHostDependencies(mixed, "0.1.6-alpha.1");
 assert.equal(pinned.dependencies["@deepseek-ai/dsh-app-boot"], "0.1.6-alpha.1");
@@ -34,6 +34,18 @@ assert.equal(hostCordisOverrides("0.2.0-rc.2")["@deepseek-ai/cordis-plugin-hmr"]
 assert.equal(hostCordisOverrides("0.2.1-alpha.1")["@deepseek-ai/cordis"], "4.0.5-alpha.1");
 assert.equal(hostCordisOverrides("0.2.1-alpha.1")["@deepseek-ai/cordis-plugin-hmr"], "1.0.20-alpha.1");
 assert.equal(hostCordisOverrides("0.2.1-alpha.2")["@deepseek-ai/cordis"], "4.0.5-alpha.1");
+// 缺 pin 表必须硬失败：静默展开 undefined 会让宿主用错 Cordis 插件线并在启动前退出。
+assert.throws(() => pluginPins("9.9.9"), /缺少 9\.9\.9 的插件 pin/);
+const requiredCordisPins = ["@deepseek-ai/cordis", "@deepseek-ai/cordis-plugin-group", "@deepseek-ai/cordis-plugin-hmr", "@deepseek-ai/cordis-plugin-include", "@deepseek-ai/cordis-plugin-loader", "@deepseek-ai/cordis-plugin-timer"];
+for (const host of supportedHosts) {
+  const overrides = hostCordisOverrides(host);
+  for (const name of requiredCordisPins) assert.ok(overrides[name], `${host} 缺少 ${name}`);
+}
+// 已验证宿主里，0.2.1-alpha.1/alpha.2 的宿主契约要求 schemastery 3.18.5-alpha.1。
+assert.equal(hostCordisOverrides("0.2.1-alpha.1")["@deepseek-ai/schemastery"], "3.18.5-alpha.1");
+assert.equal(hostCordisOverrides("0.2.1-alpha.2")["@deepseek-ai/schemastery"], "3.18.5-alpha.1");
+// 更早的宿主没有这条契约，不应被加上 override。
+assert.equal(hostCordisOverrides("0.2.0-rc.2")["@deepseek-ai/schemastery"], undefined);
 assert.equal(cordisPin(developmentHost), "4.0.5-alpha.1");
 assert.equal(developmentHost, "0.2.1-alpha.2");
 assert.deepEqual(supportedHosts, ["0.1.2-rc.1", "0.1.5-rc.1", "0.1.5-rc.2", "0.1.5-rc.3", "0.1.7-rc.1", "0.1.7-rc.2", "0.2.0-rc.1", "0.2.0-rc.2", "0.2.1-alpha.1", "0.2.1-alpha.2"]);
