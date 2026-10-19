@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## 1.1.15 - 2026-10-19
+
+This release absorbs a set of fixes from upstream that do not depend on the newer host APIs, keeping the plugin installable across all of DSH 0.x.
+
+- Settings → Skills now gets its own skill icon in the settings sidebar, chosen by the exact label the host renders and drawn as an independent CSS mask. Third-party skins that recognise icons by inspecting svg children no longer hide it, and unload restores the original gear. The settings section order also moved to 25 so a sibling plugin cannot make the entry jump.
+- Turning an external source off no longer leaves a shadowing candidate behind. Previously the disabled copy still outranked the bundled skill, so the host kept resolving the source you had just switched off; it now falls back to the plugin's own skill. A same-name native copy that is itself disabled still blocks, so the host cannot rediscover it through a raw filesystem scan.
+- Skills that are directory links inside `~/.dsh/skills` or a project `.dsh/skills` are listed as read-only entries instead of being invisible. Details and the enable/disable toggle work; delete, overwrite and import-replacement are refused, and the link target is never touched.
+- After a self-update, the newly installed version is merged into the profile's release-age exclude, so installing another plugin right away no longer fails the one-day supply-chain check. The write keeps inline comments, CRLF and the trailing newline, and only happens once the install succeeded.
+- A Cordis line without a plugin-pin entry now fails the build instead of silently reducing the override set to Cordis alone. `@deepseek-ai/schemastery` is pinned for the hosts that require `3.18.5-alpha.1`.
+- The release badge and the "this README describes" line are now checked against the version list, fixing a badge that had drifted to `0.2.0-rc.2`.
+- The test run now fails when the committed `lib/` no longer matches a fresh build, since GitHub installs read that committed output.
+
 ## 1.1.14 - 2026-10-09
 
 This release supports DeepSeek Harness `0.2.1-alpha.2`. Previously supported versions remain available.
