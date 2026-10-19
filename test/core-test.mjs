@@ -881,9 +881,8 @@ const disabledCursorSource = (await listProviderCandidates()).find(
   (item) => item.source === "agent-cursor" && item.name === "cursor-review",
 );
 ok(
-  disabledCursorSource &&
-    disabledCursorSource.invocation.userInvocable === false,
-  "Cursor source supports manager-local source disable",
+  !disabledCursorSource,
+  "disabled Cursor source does not contribute a shadowing candidate",
 );
 await setSourceEnabled("cursor", true);
 
@@ -967,18 +966,9 @@ if (await tryLink(ccswitchSkill, linkedCcSwitchSkill, providerLinkType)) {
   const disabledCcSwitchCandidates = (await listProviderCandidates()).filter(
     (item) => item.name === "ccswitch-shared",
   );
-  const disabledCcSwitch = disabledCcSwitchCandidates.find(
-    (item) => item.source === "agent-ccswitch",
-  );
-  ok(
-    disabledCcSwitch &&
-      disabledCcSwitch.invocation.modelInvocable === false &&
-      disabledCcSwitch.invocation.userInvocable === false,
-    "CC Switch source supports manager-local source disable",
-  );
   eq(
     disabledCcSwitchCandidates.length,
-    1,
+    0,
     "disabling CC Switch does not restore its Codex distribution link as another candidate",
   );
   await setSourceEnabled("ccswitch", true);
@@ -1257,9 +1247,8 @@ ok(
 await setSourceEnabled("codex", false);
 providerCandidates = await listProviderCandidates();
 ok(
-  providerCandidates.find((item) => item.name === "code-review").invocation
-    .userInvocable === false,
-  "source disable keeps external candidates disabled",
+  !providerCandidates.some((item) => item.name === "code-review"),
+  "source disable omits external candidates",
 );
 await setSourceEnabled("codex", true);
 
@@ -1329,9 +1318,8 @@ eq(
 );
 providerCandidates = await listProviderCandidates();
 ok(
-  providerCandidates.find((item) => item.name === "code-review").invocation
-    .userInvocable === false,
-  "provider keeps external candidates disabled while manager state is invalid",
+  !providerCandidates.some((item) => item.name === "code-review"),
+  "provider omits external candidates while manager state is invalid",
 );
 ok(
   providerCandidates.find(

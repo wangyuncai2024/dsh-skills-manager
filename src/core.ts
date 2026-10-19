@@ -2766,6 +2766,10 @@ export async function listProviderCandidates(options: ScopeOptions = {}) {
   }
   for (const group of groupLoadableSkillsByName(items).values()) {
     const { root, entry, policy } = selectSkillWinner(group);
+    // 关闭的外部来源不覆盖其他插件；同名组内的原生副本及分发链接仍需禁用覆盖。
+    const hasNativeCopy = group.some(({ root, entry }) => root.native ||
+      entry.policyAliases?.some((alias) => user.some((item) => item.key === alias.rootKey && item.native)));
+    if (!hasNativeCopy && !policy.sourceEnabled) continue;
     const project = root.scope === "project";
     const policyOnly = root.mutable;
     // 回退副本也必须覆盖组内更高优先级的原生条目，防止宿主重新选中已停用副本。
