@@ -20,7 +20,7 @@ async function ok(condition, message) {
   }
 }
 
-for (const path of ["../src/core.ts", "../src/readonly-discovery.ts", "../src/index.ts", "../src/client.ts"]) {
+for (const path of ["../src/core.ts", "../src/readonly-discovery.ts", "../src/index.ts", "../src/skills-sh-catalog.ts", "../src/catalog-skill.ts", "../src/clawhub-catalog.ts", "../src/client.ts"]) {
   try {
     await access(new URL(path, import.meta.url), constants.R_OK);
     await ok(true, `${path} exists as maintained source`);
@@ -29,7 +29,7 @@ for (const path of ["../src/core.ts", "../src/readonly-discovery.ts", "../src/in
   }
 }
 
-for (const path of ["../lib/core.js", "../lib/readonly-discovery.js", "../lib/index.js", "../lib/client.js"]) {
+for (const path of ["../lib/core.js", "../lib/readonly-discovery.js", "../lib/index.js", "../lib/skills-sh-catalog.js", "../lib/catalog-skill.js", "../lib/clawhub-catalog.js", "../lib/client.js"]) {
   try {
     await access(new URL(path, import.meta.url), constants.R_OK);
     await ok(true, `${path} exists as generated output`);
@@ -59,6 +59,11 @@ const typeConfig = JSON.parse(await readFile(new URL("../tsconfig.json", import.
 await ok(typeConfig.compilerOptions?.strict === true && typeConfig.compilerOptions?.noEmit === true, "严格类型检查不能由转译构建替代");
 await ok(typeConfig.compilerOptions?.erasableSyntaxOnly === true, "源码使用 Node 原生可擦除的 TypeScript 语法");
 await ok(!(await readdir(new URL("../src/", import.meta.url))).some(name => name.endsWith(".js")), "维护源码不再混入未检查的 JavaScript 模块");
+
+for (const name of ["types", "core", "index", "repositories"]) {
+  const source = await readFile(new URL(`../src/${name}.ts`, import.meta.url), "utf8");
+  await ok(!/allowRepositoryRoot|userWriteOptions/.test(source), `${name} 不再依赖旧的仓库写入放行参数`);
+}
 
 const projectRoot = new URL("../", import.meta.url);
 const ignoreRules = await readFile(new URL("../.gitignore", import.meta.url), "utf8");

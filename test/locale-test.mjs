@@ -53,7 +53,7 @@ const literalSource = [
   await readFile(new URL("../src/plugin-update-ui.ts", import.meta.url), "utf8"),
 ].join("\n");
 const bundleSource = await readFile(
-  new URL("../lib/client.js", import.meta.url),
+  process.env.DSH_CLIENT_TEST_BUNDLE || new URL("../lib/client.js", import.meta.url),
   "utf8",
 );
 const manifest = JSON.parse(
@@ -321,7 +321,6 @@ for (const base of [
   "summary.shadowed",
   "summary.invalid",
   "upload.selected",
-  "trash.count",
 ]) {
   ok(
     countKey(base, 1) in DICT.zh && countKey(base, 1) in DICT.en,
@@ -459,7 +458,8 @@ eq(
   visibleSkillRoots([
     { key: "project-empty", scope: "project", exists: false, skills: [] },
     { key: "project-used", scope: "project", skills: [{ name: "demo" }] },
-    { key: "codex", scope: "user", skills: [] },
+    { key: "codex-absent", scope: "user", exists: false, skills: [] },
+    { key: "codex", scope: "user", exists: true, skills: [] },
   ])
     .map(function (root) {
       return root.key;
@@ -467,6 +467,21 @@ eq(
     .join(","),
   "project-used,codex",
   "main list hides absent read-only roots",
+);
+
+eq(
+  bundle.scopeSkillRoots([
+    { key: "dsh", scope: "user", mutable: true, exists: true, skills: [] },
+    { key: "agents", scope: "user", mutable: false, exists: true, skills: [] },
+    { key: "codex", scope: "user", mutable: false, exists: true, skills: [{ name: "foo" }] },
+    { key: "project-dsh", scope: "project", mutable: true, exists: true, skills: [] },
+  ])
+    .map(function (root) {
+      return root.key;
+    })
+    .join(","),
+  "dsh,codex",
+  "scopeSkillRoots retains mutable roots and non-empty read-only roots while excluding empty ones and project scope",
 );
 
 const parseApiResponse = bundle.parseApiResponse;
@@ -738,7 +753,7 @@ eq(bundle.currentSessionId({ byId: { other: { retainedBy: { sidebar: 1 } } } }),
 eq(bundle.currentSessionId({}), undefined, "currentSessionId is absent without a current session");
 ok(bundle.canToggleSource({ key: "copilot", toggleable: true }), "user Agent sources keep a source toggle");
 ok(bundle.canToggleSource({ key: "project-copilot:abc", kind: "project-copilot", toggleable: true }), "read-only project Agent sources expose a source toggle");
-ok(!bundle.canToggleSource({ key: "dsh", toggleable: true }), "user DSH has no source-wide toggle");
+ok(bundle.canToggleSource({ key: "dsh", toggleable: true }), "user DSH exposes a source-wide toggle");
 ok(!bundle.canToggleSource({ key: "project-dsh:abc", kind: "project-dsh", toggleable: true }), "project DSH has no source-wide toggle");
 eq(
   JSON.stringify(bundle.countSkillStatuses([
@@ -752,8 +767,8 @@ eq(
   "summary counts match status-filter buckets",
 );
 ok(
-  DICT.zh["create.target"] && DICT.en["trash.source"],
-  "project create targets and Trash source labels are localized in both languages",
+  DICT.zh["dest.scope.workspace"] && DICT.en["dest.scope.workspace"] && DICT.zh["workspace.noSkills"] && DICT.en["workspace.noSkills"] && DICT.en["trash.source"],
+  "workspace destination, project page and Trash source labels are localized in both languages",
 );
 
 eq(
@@ -817,7 +832,17 @@ eq(
 eq(
   translateError(mockT, { code: "error.unknown", error: "原文错误" }),
   "原文错误",
-  "translateError falls back to error text on an unknown code",
+  "unknown code keeps the server sentence when one is present",
+);
+eq(
+  translateError(mockT, { code: "ENOENT", error: "ENOENT: no such file or directory, open C:/tmp" }),
+  "ENOENT: no such file or directory, open C:/tmp",
+  "node errno keeps the full message instead of the bare code",
+);
+eq(
+  translateError(mockT, { code: "ENOENT" }),
+  "ENOENT",
+  "bare code is kept only when there is no sentence",
 );
 eq(
   translateError(mockT, {
@@ -957,24 +982,24 @@ ok(
   "import modal renders upload feedback where it remains visible",
 );
 ok(
-  /setResult\(null\);\s*setUpload\(null\);\s*setModal\("import"\)/.test(source),
+  /setResult\(null\);\s*setUpload\(null\);\s*setImportDestination\(defaultDestination\(\)\);\s*setModal\("import"\)/.test(source),
   "opening import clears stale upload feedback and selection",
 );
 ok(
-  /hostButton\(t\("btn\.refresh"\),\s*function\s*\(\)\s*\{\s*refresh\(false\);/.test(source),
+  /filterActionButton\(t\("btn\.refresh"\),\s*strokeIcon\(.*refresh\(false\);/.test(source),
   "settings exposes an explicit refresh action for project file changes",
 );
 ok(
-  source.includes('t("create.globalTarget")') && !source.includes("value: form.root"),
-  "create dialog displays a fixed global destination",
+  source.includes("createDestination") && source.includes("allowAgents: true") && !source.includes("value: form.root"),
+  "create and import dialogs use the shared destination picker including Shared Agent",
 );
 ok(
   source.includes('t("trash.source", { source: trashRootLabel(item) })'),
   "Trash identifies the original user or project source before restore",
 );
 ok(
-  /allRoots\.find\(function\s*\(root\)[\s\S]{0,80}root\.key === "dsh"/.test(source),
-  "global creation stays available independently of the current project",
+  !source.includes("!createRoot") && source.includes("openCreate"),
+  "creation does not depend on the current project or on a single global root",
 );
 ok(
   source.includes("canToggleSource(root)") &&
@@ -1081,5 +1106,13 @@ for (const lang of ["zh", "en"]) {
   ok(result.text.includes(lang === "zh" ? "first；second" : "first; second"), `${lang} warning separator follows UI language`);
 }
 
+// en-GB 字典回退到 en-US 词典，但日期必须保留有效宿主区域。
+let hostActive = "en-GB";
+bundle.apply({ ...fakeCtx, effect() {}, locale: { ...fakeCtx.locale, getLocale() { return { active: hostActive, revision: 1, locales: [] }; } } });
+const britishT = key => DICT.en[key] || key;
+const britishDate = "2026-09-12T13:04:05Z";
+eq(bundle.formatTrashTime(britishT, britishDate), new Date(britishDate).toLocaleString("en-GB"), "en-GB 日期不被 en-US 字典回退覆盖");
+hostActive = "zh";
+eq(bundle.formatTrashTime(britishT, britishDate), new Date(britishDate).toLocaleString("zh"), "宿主有效 locale 优先于词典格式区域，语言切换实时读取");
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

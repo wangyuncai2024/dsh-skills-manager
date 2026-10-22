@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HostContext, ProviderControl, Agent } from "./host-types.js";
-import type { Log, Serialize, CreateInput, UploadInput, SkillRequest, RepositoryInput, ScopeOptions } from "./types.js";
+import type { Log, Serialize, CreateInput, UploadInput, SkillRequest, RepositoryInput, ScopeOptions, SkillRoot, OperationError, RootView, Diagnostic } from "./types.js";
 import type { ProviderCandidate } from "./core.js";
 import type { CodedError } from "./types.js";
 // dsh-skills-manager host half：设置面板的 HTTP 后端（webServer prefix 路由）
@@ -10,13 +10,17 @@ import type { CodedError } from "./types.js";
 // - 所有来源的启停只写 manager 状态，不改原始 Skill 文件
 // - $DSH_HOME\skills 与活动项目 .dsh/skills 可创建、回收与恢复；Agent 来源文件保持只读
 
-import { appendFile, rename, rm, stat } from "node:fs/promises";
+import { appendFile, rename, rm, stat, realpath } from "node:fs/promises";
 import {
   state,
   setSkillEnabled,
   setSourceEnabled,
-  deleteSkill,
-  permanentlyDeleteTrash,
+  createCategory,
+  renameCategory,
+  deleteCategory,
+  assignSkillCategory,
+  moveSkillInCategory,
+  setCategoryEnabled,
   importSkill,
   importUploadedSkill,
   browseDirectories,
@@ -26,14 +30,19 @@ import {
   getProviderSkill,
   userRoots,
   projectRoots,
+  resolveWorkspaceTarget,
+  listWorkspaces,
+  workspaceSkills,
   logPath,
 } from "./core.js";
 import { registerPluginUpdater } from "./plugin-updater.js";
 import { createRepositoryManager } from "./repositories.js";
+import { installationSourceKey } from "./repository-updates.js";
+import { listClawHub, searchClawHub } from "./clawhub-catalog.js";
+import { searchSkillsSh } from "./skills-sh-catalog.js";
+import { loadCatalogPackage, readCatalogSkill } from "./catalog-skill.js";
 
 const name = "skills-manager";
-// webRuntime 在 DSH 0.2.1-alpha.2 起已移除，trustedHosts 迁到 connection 服务。
-// 两者都用 ctx.get 可选读取（见 resolveTrustedHosts），不能让 inject 卡住整个插件。
 const inject = ["webServer", "skills", "tools", "sessions"];
 const CLIENT_MARKER_HEADER = "x-dsh-skills-manager";
 const MAX_LOG_BYTES = 1 << 20;
@@ -143,15 +152,6 @@ function isTrustedAuthority(hostUrl: URL, trustedHosts: string[]) {
   });
 }
 
-/**
- * 读取宿主信任的 Host 列表，跨版本兼容两种提供方：
- * - DSH ≤ 0.2.0：`webRuntime.trustedHosts`
- * - DSH ≥ 0.2.1-alpha.2：`connection.trustedHosts`（webRuntime 已移除）
- * 优先用 ctx.get 可选读取；直接访问属性在未 inject 时会抛
- * "cannot get property ... without inject"，因此两条路径都做保护。
- * 服务缺失时退回空列表：loopback 仍然放行，不会放宽安全边界。
- * 每次请求现读而不缓存：本插件不再 inject 这两个服务，启动时它们未必已经激活。
- */
 function resolveTrustedHosts(ctx: HostContext): string[] {
   const read = (name: "connection" | "webRuntime") => {
     try {
@@ -244,7 +244,8 @@ function run(res: ServerResponse, task: () => unknown, afterSuccess?: () => void
     try {
       json(res, Number.isInteger(e && e.statusCode) ? e.statusCode! : 500, {
         ok: false,
-        ...(e && e.code ? { code: e.code } : {}),
+        ...(e && typeof e.code === "string" ? { code: e.code } : {}),
+        ...(e && e.params && typeof e.params === "object" && !Array.isArray(e.params) ? { params: e.params } : {}),
         error: String(e && e.message ? e.message : e),
       }, headOnly);
     } catch {
@@ -280,6 +281,23 @@ function notifyChatCatalog(ctx: HostContext, invalidateSkills?: () => void) {
     }
   } catch {
     /* 斜杠菜单刷新失败不影响已完成的文件操作 */
+  }
+}
+
+/**
+ * 读取宿主登记的工作区路径。服务缺失、方法缺失或抛错都返回 undefined，
+ * 由 resolveWorkspaceTarget 统一拒绝写项目，用户目录写入不受影响。
+ */
+function registeredWorkspacePaths(ctx: HostContext): string[] | undefined {
+  try {
+    const registry = typeof ctx.get === "function" ? ctx.get("workspaceRegistry") : undefined;
+    if (!registry || typeof registry.list !== "function") return undefined;
+    return [...registry.list()].flatMap((item) => {
+      const path = item?.path ?? item?.cwd;
+      return typeof path === "string" && path.trim() ? [path.trim()] : [];
+    });
+  } catch {
+    return undefined;
   }
 }
 
@@ -359,7 +377,7 @@ function apply(ctx: HostContext) {
     manifestUrl: new URL("../package.json", import.meta.url),
   }), "skills-manager: plugin updater");
   const log = makeLog();
-  const repositories = createRepositoryManager({ log });
+  const repositories = createRepositoryManager({ log, registeredWorkspaces: () => registeredWorkspacePaths(ctx) });
   // 每次请求现读，避免在 connection 激活之前就把信任列表固化下来。
   const trustedHosts = () => resolveTrustedHosts(ctx);
   const roots = userRoots();
@@ -395,7 +413,7 @@ function apply(ctx: HostContext) {
       },
       output: {
         schema: { type: "object" },
-        render: (_args, value) => [{ type: "text", text: value && value.ok === false ? `Skill creation failed: ${value.error}` : `Created DSH skill ${value.name} at ${value.path}` }],
+        render: (_args, value) => [{ type: "text", text: value && value.ok === false ? `Skill creation failed${typeof value.code === "string" ? ` (${value.code})` : ""}.` : `Created DSH skill ${value.name} at ${value.path}` }],
       },
       async execute(args) {
         return enqueueMutation(async () => {
@@ -424,18 +442,37 @@ function apply(ctx: HostContext) {
       const path = u.pathname.replace(/\/+$/, "");
       const sessionId = req.headers["x-dsh-skills-session"];
       const projectOptions = () => ({ projectCwds: activeSessionCwds(ctx, sessionId) });
-      const requestRoot = async (key: string) => rootByKey[key] || (await projectRoots(projectOptions().projectCwds)).find((root) => root.key === key);
-      const stateWithSources = async () => {
-        const snapshot = await state(projectOptions());
+      /** 请求体带 workspace 时只经登记列表解析；字段存在但无效也拒绝，不静默回退到用户目录。 */
+      const workspaceTarget = async (body: RequestBody) => {
+        if (body.workspace === undefined) return null;
+        return resolveWorkspaceTarget(body.workspace, registeredWorkspacePaths(ctx));
+      };
+      /** 项目页操作带 workspace：先按登记路径校验，再只在该项目的来源里解析，不依赖当前会话。 */
+      const workspaceScope = async (body: RequestBody): Promise<{ projectCwds: string[] } | OperationError | null> => {
+        const target = await workspaceTarget(body);
+        if (!target) return null;
+        if ("ok" in target && target.ok === false) return target;
+        return { projectCwds: (target as { root: SkillRoot }).root.workspaceCwds ?? [] };
+      };
+      const scopedOptions = (scope: { projectCwds: string[] } | null) => scope ?? projectOptions();
+      const requestRoot = async (key: string, cwds?: string[]) => cwds ? (await projectRoots(cwds)).find((root) => root.key === key) : rootByKey[key] || (await projectRoots(projectOptions().projectCwds)).find((root) => root.key === key);
+      /** 单项操作的统一入口：有 workspace 就在其作用域内解析根，无则沿用当前会话。 */
+      const withScope = async <T>(body: RequestBody, action: (scope: { projectCwds: string[] } | null) => Promise<T>) => {
+        const scope = await workspaceScope(body);
+        if (scope && "ok" in scope && scope.ok === false) return scope;
+        return action(scope as { projectCwds: string[] } | null);
+      };
+      const attachSources = async <T extends { roots: RootView[]; warnings: Diagnostic[] }>(snapshot: T) => {
         try {
           const sources = await repositories.sources();
-          for (const root of snapshot.roots) for (const skill of root.skills || []) {
-            const source = sources[skill.name];
-            skill.installSource = source && (source.root || "dsh") === root.key ? source : null;
+          for (const root of snapshot.roots) {
+            const realRoot = await realpath(root.path).catch(() => root.path);
+            for (const skill of root.skills || []) skill.installSource = sources[installationSourceKey(realRoot, skill.name)] ?? null;
           }
         } catch (caught) { const error = caught as CodedError; snapshot.warnings.push({ code: "error.repo.state", error: error.message }); }
         return snapshot;
       };
+      const stateWithSources = async () => attachSources(await state(projectOptions()));
       try {
         const hostError = validateRequestOrigin(req, trustedHosts());
         if (hostError) {
@@ -445,8 +482,29 @@ function apply(ctx: HostContext) {
         if (req.method === "GET" && path === "/api/dsh-skills-manager/state") {
           return run(res, stateWithSources);
         }
+        if ((req.method === "GET" || req.method === "HEAD") && path === "/api/dsh-skills-manager/workspaces") {
+          return run(res, async () => ({ items: await listWorkspaces(registeredWorkspacePaths(ctx) ?? []) }), undefined, req.method === "HEAD");
+        }
         if ((req.method === "GET" || req.method === "HEAD") && path === "/api/dsh-skills-manager/repositories") {
-          return run(res, () => repositories.list(), undefined, req.method === "HEAD");
+          return run(res, () => enqueueMutation(() => repositories.list()), undefined, req.method === "HEAD");
+        }
+        if (req.method === "GET" && (path === "/api/dsh-skills-manager/clawhub/list" || path === "/api/dsh-skills-manager/clawhub/search")) {
+          const searching = path.endsWith("/search");
+          const allowed = searching ? ["q", "limit"] : ["limit", "cursor", "sort"];
+          if ([...u.searchParams.keys()].some(key => !allowed.includes(key) || u.searchParams.getAll(key).length !== 1) || searching && !u.searchParams.has("q")) {
+            json(res, 400, { ok: false, code: "error.catalog.query", error: "目录查询参数无效" });
+            return;
+          }
+          const parameter = (key: string) => u.searchParams.get(key) ?? undefined;
+          return run(res, () => searching ? searchClawHub(parameter("q")!, { limit: parameter("limit") }) : listClawHub({ limit: parameter("limit"), sort: parameter("sort"), cursor: parameter("cursor") }));
+        }
+        if (req.method === "GET" && path === "/api/dsh-skills-manager/skills-sh/search") {
+          const queries = u.searchParams.getAll("q");
+          if (queries.length !== 1) {
+            json(res, 400, { ok: false, code: "error.catalog.query", error: "搜索词不能为空且不能超过 100 个字符" });
+            return;
+          }
+          return run(res, () => searchSkillsSh(queries[0]));
         }
         if (req.method === "HEAD") {
           // HEAD 复用 GET/405 的载荷计算 content-length，保持与实体一致的响应头语义。
@@ -471,8 +529,20 @@ function apply(ctx: HostContext) {
         if (path === "/api/dsh-skills-manager/browse") {
           return run(res, () => browseDirectories(body.path));
         }
-        // 下载刷新只修改仓库目录缓存，使用仓库自己的串行队列，避免阻塞本地启停和导入。
+        // 网络只读阶段不占本地写入队列；最终文件和状态提交仍串行。
         if (path === "/api/dsh-skills-manager/repositories/refresh") return run(res, () => repositories.refresh(body));
+        if (path === "/api/dsh-skills-manager/catalog/detail") return run(res, () => readCatalogSkill(body));
+        if (path === "/api/dsh-skills-manager/catalog/install") {
+          return run(res, async () => {
+            if (body.root !== undefined && body.root !== "dsh" && body.root !== "agents") throw Object.assign(new Error("技能安装位置无效"), { statusCode: 400, code: "error.repo.invalid" });
+            if (body.workspace !== undefined && body.root !== undefined && body.root !== "dsh") throw Object.assign(new Error("工作区只能安装到项目 DSH skills"), { statusCode: 400, code: "error.repo.invalid" });
+            const target = await workspaceTarget(body);
+            if (target && "ok" in target && target.ok === false) return target;
+            const pack = await loadCatalogPackage(body);
+            const catalogId = body.catalog === "skillsh" ? `skillsh:${body.source}/${body.skillId}` : `clawhub:${body.owner}/${body.slug}`;
+            return enqueueMutation(() => repositories.installCatalog(catalogId, pack, { root: body.root, ...(body.workspace === undefined ? {} : { workspace: body.workspace }) }));
+          }, afterWrite);
+        }
         return enqueueMutation(() => {
           switch (path) {
             case "/api/dsh-skills-manager/repositories/add":
@@ -482,7 +552,7 @@ function apply(ctx: HostContext) {
             case "/api/dsh-skills-manager/repositories/detail":
               return run(res, () => repositories.detail(body));
             case "/api/dsh-skills-manager/repositories/install":
-              return run(res, () => repositories.install(body), afterWrite);
+              return run(res, () => repositories.install(body, registeredWorkspacePaths(ctx)), afterWrite);
             case "/api/dsh-skills-manager/repositories/uninstall":
               return run(res, () => repositories.uninstall(body), afterWrite);
             case "/api/dsh-skills-manager/repositories/preview":
@@ -491,37 +561,75 @@ function apply(ctx: HostContext) {
               return run(res, () => repositories.update(body), afterWrite);
             case "/api/dsh-skills-manager/repositories/rollback":
               return run(res, () => repositories.rollback(body), afterWrite);
+            case "/api/dsh-skills-manager/workspace-skills":
+              return run(res, async () => {
+                const snapshot = await workspaceSkills(body.workspace, registeredWorkspacePaths(ctx));
+                return "roots" in snapshot ? attachSources(snapshot) : snapshot;
+              });
             case "/api/dsh-skills-manager/enable":
-              return run(res, async () => setSkillEnabled(await requestRoot(String(body.root || "dsh")), String(body.name || ""), true, log), afterWrite);
+              return run(res, () => withScope(body, async (scope) => setSkillEnabled(await requestRoot(String(body.root || "dsh"), scope?.projectCwds), String(body.name || ""), true, log)), afterWrite);
             case "/api/dsh-skills-manager/disable":
-              return run(res, async () => setSkillEnabled(await requestRoot(String(body.root || "dsh")), String(body.name || ""), false, log), afterWrite);
+              return run(res, () => withScope(body, async (scope) => setSkillEnabled(await requestRoot(String(body.root || "dsh"), scope?.projectCwds), String(body.name || ""), false, log)), afterWrite);
             case "/api/dsh-skills-manager/source-enable":
-              return run(res, () => setSourceEnabled(String(body.root || ""), true, log, projectOptions()), afterWrite);
+              return run(res, () => withScope(body, (scope) => setSourceEnabled(String(body.root || ""), true, log, scopedOptions(scope))), afterWrite);
             case "/api/dsh-skills-manager/source-disable":
-              return run(res, () => setSourceEnabled(String(body.root || ""), false, log, projectOptions()), afterWrite);
+              return run(res, () => withScope(body, (scope) => setSourceEnabled(String(body.root || ""), false, log, scopedOptions(scope))), afterWrite);
+            case "/api/dsh-skills-manager/category-create":
+              return run(res, () => withScope(body, (scope) => createCategory(String(body.root || ""), String(body.name || ""), log, scopedOptions(scope))));
+            case "/api/dsh-skills-manager/category-rename":
+              return run(res, () => withScope(body, (scope) => renameCategory(String(body.root || ""), String(body.id || ""), String(body.name || ""), log, scopedOptions(scope))));
+            case "/api/dsh-skills-manager/category-delete":
+              return run(res, () => withScope(body, (scope) => deleteCategory(String(body.root || ""), String(body.id || ""), log, scopedOptions(scope))));
+            case "/api/dsh-skills-manager/category-assign":
+              return run(res, () => withScope(body, (scope) => assignSkillCategory(String(body.root || ""), String(body.name || ""), String(body.category || ""), log, scopedOptions(scope))));
+            case "/api/dsh-skills-manager/category-move":
+              return run(res, () => withScope(body, (scope) => moveSkillInCategory(String(body.root || ""), String(body.name || ""), String(body.category || ""), body.targetName ? String(body.targetName) : undefined, body.position === undefined ? "before" : String(body.position), log, scopedOptions(scope))));
+            case "/api/dsh-skills-manager/category-enable":
+              return run(res, () => withScope(body, (scope) => setCategoryEnabled(String(body.root || ""), String(body.category || ""), true, log, scopedOptions(scope))), afterWrite);
+            case "/api/dsh-skills-manager/category-disable":
+              return run(res, () => withScope(body, (scope) => setCategoryEnabled(String(body.root || ""), String(body.category || ""), false, log, scopedOptions(scope))), afterWrite);
             case "/api/dsh-skills-manager/delete":
-              return run(res, async () => deleteSkill(await requestRoot(String(body.root || "dsh")), String(body.name || ""), log), afterWrite);
+                          return run(res, () => withScope(body, async (scope) => {
+                            const target = await workspaceTarget(body);
+                            if (target && "ok" in target && target.ok === false) return target;
+                            const root = target ? (target as { root: SkillRoot }).root : await requestRoot(String(body.root || "dsh"), scope?.projectCwds);
+                            return repositories.trashSkill(root, String(body.name || ""));
+                          }), afterWrite);
             case "/api/dsh-skills-manager/trash-restore":
-              return run(res, () => repositories.restoreTrash(String(body.id || ""), projectOptions()), afterWrite);
+              return run(res, () => withScope(body, (scope) => repositories.restoreTrash(String(body.id || ""), { ...(scope ?? {}), registeredWorkspaces: registeredWorkspacePaths(ctx) })), afterWrite);
             case "/api/dsh-skills-manager/trash-delete":
-              return run(res, () => permanentlyDeleteTrash(String(body.id || ""), log));
+              return run(res, () => repositories.permanentlyDeleteTrash(String(body.id || "")));
             case "/api/dsh-skills-manager/detail":
-              return run(res, () => skillDetail(String(body.root || "dsh"), String(body.name || ""), projectOptions()));
+              return run(res, () => withScope(body, (scope) => skillDetail(String(body.root || "dsh"), String(body.name || ""), scope ? { ...scope, workspaceBound: true } : projectOptions())));
             case "/api/dsh-skills-manager/create":
-              return run(res, async () => createSkill(
-                { name: body.name, description: body.description, body: body.body },
-                log,
-                { root: await requestRoot(String(body.root || "dsh")) },
-              ), afterWrite);
+              return run(res, async () => {
+                const target = await workspaceTarget(body);
+                if (target && "ok" in target && target.ok === false) return target;
+                return createSkill(
+                  { name: body.name, description: body.description, body: body.body },
+                  log,
+                  { root: target ? (target as { root: SkillRoot }).root : await requestRoot(String(body.root || "dsh")) },
+                );
+              }, afterWrite);
             case "/api/dsh-skills-manager/import":
-              return run(res, () => importSkill(String(body.source || ""), log, {
-                conflict: body.conflict === "overwrite" ? "overwrite" : "skip",
-                dryRun: body.dryRun === true,
-              }), body.dryRun === true ? undefined : afterWrite);
+              return run(res, async () => {
+                const target = await workspaceTarget(body);
+                if (target && "ok" in target && target.ok === false) return target;
+                return importSkill(String(body.source || ""), log, {
+                  conflict: body.conflict === "overwrite" ? "overwrite" : "skip",
+                  dryRun: body.dryRun === true,
+                  ...(target ? { root: (target as { root: SkillRoot }).root } : body.root === "agents" ? { root: await requestRoot("agents") } : {}),
+                });
+              }, body.dryRun === true ? undefined : afterWrite);
             case "/api/dsh-skills-manager/upload":
-              return run(res, () => importUploadedSkill({ name: body.name, entries: body.entries, zip: body.zip }, log, {
-                conflict: body.conflict === "overwrite" ? "overwrite" : "skip",
-              }), afterWrite);
+              return run(res, async () => {
+                const target = await workspaceTarget(body);
+                if (target && "ok" in target && target.ok === false) return target;
+                return importUploadedSkill({ name: body.name, entries: body.entries, zip: body.zip }, log, {
+                  conflict: body.conflict === "overwrite" ? "overwrite" : "skip",
+                  ...(target ? { root: (target as { root: SkillRoot }).root } : body.root === "agents" ? { root: await requestRoot("agents") } : {}),
+                });
+              }, afterWrite);
             default:
               json(res, 404, { ok: false, code: "error.proto.unknownAction", error: `unknown action: ${path}` });
           }
@@ -529,7 +637,8 @@ function apply(ctx: HostContext) {
       } catch (caught) { const e = caught as CodedError;
         json(res, Number.isInteger(e && e.statusCode) ? e.statusCode! : 500, {
           ok: false,
-          ...(e && e.code ? { code: e.code } : {}),
+          ...(e && typeof e.code === "string" ? { code: e.code } : {}),
+          ...(e && e.params && typeof e.params === "object" && !Array.isArray(e.params) ? { params: e.params } : {}),
           error: String(e && e.message ? e.message : e),
         });
       }
@@ -540,4 +649,4 @@ function apply(ctx: HostContext) {
 export { activeSessionCwds, apply, inject, name, notifyChatCatalog, registerAgentSkillProviders };
 
 /** 请求体由各业务入口现有校验解析，此类型只声明路由转交的字段。 */
-type RequestBody = CreateInput & UploadInput & SkillRequest & RepositoryInput & {root?: string; source?: string; conflict?: string; dryRun?: boolean};
+type RequestBody = CreateInput & UploadInput & SkillRequest & RepositoryInput & {root?: string; source?: string; conflict?: string; dryRun?: boolean; workspace?: unknown; enabled?: boolean; category?: string; targetName?: string; position?: "before" | "after"; catalog?: string; skillId?: string; owner?: string; slug?: string};

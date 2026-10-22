@@ -121,7 +121,6 @@ try {
     windsurf: ".windsurf",
     trae: ".trae",
     "trae-cn": ".trae-cn",
-    openclaw: "",
     roo: ".roo",
     codebuddy: ".codebuddy",
     workbuddy: ".workbuddy",
@@ -247,9 +246,7 @@ try {
   assert.equal(afterDisable.summary.enabled, afterDisable.roots.flatMap((r) => r.skills).filter((skill) => skill.enabled === true).length);
   assert.equal(typeof afterDisable.summary.disabled, "number");
   assert.equal(typeof afterDisable.summary.issues, "number");
-  const openclawRoot = afterDisable.roots.find((r) => r.kind === "project-openclaw");
-  assert.equal(openclawRoot.path, join(project, "skills"), "通用项目 Skills 保留 workspace/skills 目录");
-  assert.equal(openclawRoot.localeKey, "projectSkills", "根目录 skills 使用中性显示名称，保留策略 key 兼容性");
+  assert.equal(afterDisable.roots.some((r) => r.kind === "project-openclaw"), false, "通用根目录 skills 不再属于项目技能来源");
   // 关闭的项目外部来源排名更高，也不能丢掉同名原生用户副本的禁用覆盖。
   const mixed = join(temp, "mixed-disabled");
   const mixedName = "mixed-disabled-native";

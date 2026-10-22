@@ -61,7 +61,7 @@ try {
   );
   assert.equal(
     (await core.deleteSkill(agents.path, "alias")).code,
-    "error.root.readonly",
+    "error.root.unsafe",
   );
 
   await link(external, join(codex.path, "group", "other-alias"));

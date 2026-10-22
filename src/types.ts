@@ -72,11 +72,20 @@ export interface Scan {
     entries: SkillEntry[];
     truncated?: boolean;
 }
+export interface SkillCategory {
+    id: string;
+    name: string;
+}
 export interface ManagerState {
     version: number;
     sources: Record<string, boolean>;
     disabledSkills: Record<string, string[]>;
     enabledSkills: Record<string, string[]>;
+    /** 每个来源自己的列表分类。旧状态文件可以没有这两个字段。 */
+    categories: Record<string, SkillCategory[]>;
+    categoryMembers: Record<string, Record<string, string>>;
+    /** 每个来源、分类（空字符串代表未分类）里的手动排序；旧状态文件可以缺省。 */
+    categoryOrder: Record<string, Record<string, string[]>>;
 }
 export interface PolicyResult {
     state: ManagerState;
@@ -111,12 +120,15 @@ export interface SkillView extends Omit<SkillEntry, 'docPath' | 'entryPath' | 'r
     installSource?: InstallSource | null;
     /** 可写根里的顶层目录链接。详情和启停可用，删除与覆盖不可用。 */
     linked?: boolean;
+    categoryId?: string | null;
 }
 export interface RootView extends SkillRoot {
     exists: boolean;
     truncated: boolean;
     enabled: boolean;
     skills: SkillView[];
+    categories: SkillCategory[];
+    categoryOrder?: Record<string, string[]>;
 }
 export interface SkillItem {
     root: SkillRoot;
@@ -165,6 +177,7 @@ export interface RepositoryDestination {
 }
 export interface InstallSource extends RepositorySource {
     root?: RepositoryRoot;
+    workspace?: string;
     id: string;
     path: string;
     commit: string | null;
@@ -172,6 +185,8 @@ export interface InstallSource extends RepositorySource {
 export interface InstallRecord {
     /** Missing in legacy records: defaults to DSH. */
     root?: RepositoryRoot;
+    /** 安装到已登记工作区时保存的项目根；缺省表示用户目录。更新、回滚、卸载都按它定位。 */
+    workspace?: string;
     id: string;
     path: string;
     name: string;
@@ -188,10 +203,24 @@ export interface InstallRecord {
         record: InstallRecord;
     };
 }
+export interface CatalogInstallRecord {
+    id: string;
+    name: string;
+    /** 旧记录缺少位置时保留，但不猜测其安装归属。 */
+    root?: RepositoryRoot;
+    workspace?: string;
+    /** 回收站中的副本不会把后来创建的同名技能认作原安装。 */
+    trashId?: string;
+    restoreFingerprint?: string;
+    /** 文件落盘前记录精确摘要，确认失败后只恢复完全匹配的副本。 */
+    complete?: boolean;
+    files?: FileDigest[];
+}
 export interface RepositoryState {
     version: number;
     repositories: Repository[];
     installs: InstallRecord[];
+    catalogInstalls?: (CatalogInstallRecord | string)[];
 }
 export interface RepositoryInput {
     url?: string;
@@ -200,6 +229,8 @@ export interface RepositoryInput {
 }
 export interface SkillRequest {
     root?: RepositoryRoot;
+    /** 宿主实际登记路径；每次管理重新解析后与记录保存的项目根匹配。 */
+    workspace?: string;
     id: string;
     path: string;
     rollback?: boolean;
@@ -208,6 +239,9 @@ export interface SkillRequest {
 }
 export type Serialize = <T>(task: () => T | Promise<T>, recover?: boolean) => Promise<T>;
 export interface RepositoryDependencies {
+    registeredWorkspaces?: () => string[] | undefined;
+    /** 测试用来观察是否真的扫描了登记工作区；生产调用不传。 */
+    onWorkspaceIndexBuild?: () => void;
     read: () => Promise<RepositoryState>;
     write: (state: RepositoryState) => Promise<void>;
     repository: (state: RepositoryState, id: string) => Repository;
@@ -226,15 +260,19 @@ export interface RenameOptions {
     delayMs?: number;
 }
 export interface MutationOptions extends ScopeOptions {
-    /** Internal repository operations only; never taken from HTTP request bodies. */
-    allowRepositoryRoot?: boolean;
+    /** 宿主登记的工作区路径列表，由路由从 workspaceRegistry 读取；缺省表示不允许写项目。 */
+    registeredWorkspaces?: string[];
     repositoryEntryOnly?: boolean;
     repositoryTrash?: { id: string; repository: { id: string; path: string } };
+    /** 内部目录副本回收凭据，不从 HTTP 请求体读取。 */
+    catalogTrash?: { id: string; ids: string[] };
     repositoryRestore?: boolean;
     root?: RootInput;
     renameOptions?: RenameOptions;
     conflict?: string;
     dryRun?: boolean;
+    /** 内部安装事务在文件复制前持久化意图，不接受请求体回调。 */
+    beforeImport?: (pending: ImportPending[], conflicts: ImportConflict[], failed: ImportFailure[]) => Promise<void>;
 }
 export interface UploadInput {
     name?: string;

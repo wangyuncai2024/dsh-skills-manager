@@ -26,10 +26,10 @@ This README describes **1.1.15**. See the [changelog](CHANGELOG.md) and [release
 
 Bring skills from your computer and projects into DSH without switching between Agent folders.
 
-- **Manage in one place**: browse collapsible source groups, search, read, and toggle skills.
-- **Global and project skills**: the project tab follows the current session, with project copies taking priority over global copies.
+- **Manage in one place**: browse collapsible source groups, search, read, and toggle skills. Categories group skills inside a source and do not move files.
+- **Global and project skills**: select a registered workspace from the project tab dropdown. Its skills use the same source-group layout as global skills. Project copies take priority over global copies.
 - **Reuse existing skills**: supports Codex, Claude Code, Copilot, and other agents without modifying their source files when toggled.
-- **Create and import**: create a skill or import ZIP archives, folders, and `SKILL.md` files into global DSH.
+- **Create and import**: create a skill or import ZIP archives, folders, and `SKILL.md` files into your user directory (default) or a registered workspace. User-level writes can go to DSH skills or Shared Agent.
 - **Skill repositories**: discover public GitHub skills, install without overwriting local files, review updates and restore backups.
 - **Recover deleted skills**: DSH skills go to Trash first, so accidental deletions can be restored.
 

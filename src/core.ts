@@ -1,4 +1,4 @@
-import type { SkillRoot, RepositoryDestination, RootInput, Diagnostic, OperationError, CodedError, Log, DiscoveredEntry, SkillEntry, ParsedSkill, Scan, ManagerState, PolicyResult, Policy, SkillItem, ViewItem, RootView, SkillView, ScopeOptions, MutationOptions, RenameOptions, UploadInput, CreateInput, ImportCandidate, ImportPending, ImportConflict, ImportFailure, ImportResult } from "./types.js";
+import type { SkillRoot, RepositoryDestination, RootInput, Diagnostic, OperationError, CodedError, Log, DiscoveredEntry, SkillEntry, ParsedSkill, Scan, ManagerState, SkillCategory, PolicyResult, Policy, SkillItem, ViewItem, RootView, SkillView, ScopeOptions, MutationOptions, RenameOptions, UploadInput, CreateInput, ImportCandidate, ImportPending, ImportConflict, ImportFailure, ImportResult } from "./types.js";
 // dsh-skills-manager core —— 纯 Node 技能文件管理核心（仅 ZIP 解压使用 fflate，可独立单测）
 //
 // 覆盖 DSH 用户级与活动 Session 项目级技能根：
@@ -13,6 +13,7 @@ import type { SkillRoot, RepositoryDestination, RootInput, Diagnostic, Operation
 // 文件写入错误由路由返回给调用方。
 
 import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import {
   join,
   basename,
@@ -32,14 +33,14 @@ import {
 
 const KEBAB_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 // 项目来源集中定义，路径校验、策略身份和展示共用，避免新增目录只可见却不可加载。
-// 两种作用域共用 Agent 顺序；兼容目录紧跟主目录，通用项目目录最后补充。
+// 两种作用域共用 Agent 顺序；兼容目录紧跟主目录，不扫描项目根的普通资源目录。
 const EXTERNAL_SOURCE_ORDER = [
   "ccswitch", "codex", "claude", "gemini", "opencode", "cursor", "copilot",
   "windsurf", "windsurf-user", "trae", "trae-cn", "openclaw", "clawdbot",
-  "roo", "codebuddy", "workbuddy", "qoder", "qoder-cn", "lingma", "projectSkills",
+  "roo", "codebuddy", "workbuddy", "qoder", "qoder-cn", "lingma",
 ];
 function rankSources<T extends {key: string; native?: boolean; rank?: number; localeKey?: string}>(sources: T[], startRank: number) {
-  const order = (root: T) => EXTERNAL_SOURCE_ORDER.indexOf(root.localeKey === "projectSkills" ? "projectSkills" : root.key);
+  const order = (root: T) => EXTERNAL_SOURCE_ORDER.indexOf(root.key);
   const external = sources.filter((root) => !root.native);
   // 先逐项校验；单元素数组不会调用 sort 比较器，也不能漏过未登记来源。
   for (const root of external) {
@@ -56,15 +57,13 @@ const PROJECT_SOURCES = rankSources([
   // 保留原生项目 100/200；其余项目来源按统一 Agent 顺序生成 210–320。
   { key: "copilot", directory: ".github", localeKey: "copilot", label: "Copilot" },
   { key: "codex", directory: ".codex", localeKey: "codex", label: "Codex" },
-  { key: "claude", directory: ".claude", localeKey: "claude", label: "Claude" },
+  { key: "claude", directory: ".claude", localeKey: "claude", label: "Claude Code" },
   { key: "gemini", directory: ".gemini", localeKey: "gemini", label: "Gemini" },
   { key: "opencode", directory: ".opencode", localeKey: "opencode", label: "OpenCode" },
   { key: "cursor", directory: ".cursor", localeKey: "cursor", label: "Cursor" },
   { key: "windsurf", directory: ".windsurf", localeKey: "windsurf", label: "Windsurf" },
   { key: "trae", directory: ".trae", localeKey: "trae", label: "Trae" },
   { key: "trae-cn", directory: ".trae-cn", localeKey: "traeCn", label: "Trae CN" },
-  // 保留 project-openclaw:<hash> 策略键兼容已有设置；此项扫描通用 <project>/skills，并非 OpenClaw 专属目录。
-  { key: "openclaw", directory: "", localeKey: "projectSkills", label: "Project Skills" },
   { key: "roo", directory: ".roo", localeKey: "roo", label: "Roo" },
   { key: "codebuddy", directory: ".codebuddy", localeKey: "codebuddy", label: "CodeBuddy" },
   { key: "workbuddy", directory: ".workbuddy", localeKey: "workbuddy", label: "WorkBuddy" },
@@ -133,7 +132,7 @@ export function userRoots(): SkillRoot[] {
     {
       key: "dsh",
       path: join(resolveDshHome(), "skills"),
-      label: "DSH 技能",
+      label: "DSH",
       mutable: true,
       toggleable: true,
       native: true,
@@ -143,7 +142,7 @@ export function userRoots(): SkillRoot[] {
       key: "agents",
       path: join(resolveAgentsHome(), "skills"),
       label: "公共 Agent",
-      mutable: false,
+      mutable: true,
       toggleable: true,
       native: true,
       rank: 450,
@@ -173,7 +172,7 @@ export function userRoots(): SkillRoot[] {
         process.env.DSH_CLAUDE_HOME || join(homedir(), ".claude"),
         "skills",
       ),
-      label: "Claude",
+      label: "Claude Code",
       mutable: false,
       toggleable: true,
       native: false,
@@ -461,6 +460,100 @@ export async function projectRoots(projectCwds: string[] = [], diagnostics?: Dia
   return roots;
 }
 
+/** 工作区路径比较：与项目根同一套规范化，Windows 下不区分大小写。 */
+function sameWorkspace(a: string, b: string) {
+  return pathIdentity(a) === pathIdentity(b);
+}
+
+export function createWorkspaceIndex(registered?: string[], hooks?: { onBuild?: () => void }) {
+  let pending: Promise<Array<{ root: SkillRoot } | OperationError>> | undefined;
+  return {
+    registered,
+    load() {
+      if (!pending) {
+        hooks?.onBuild?.();
+        pending = indexRegisteredWorkspaces(registered);
+      }
+      return pending;
+    },
+  };
+}
+
+export async function indexRegisteredWorkspaces(registered?: string[]): Promise<Array<{ root: SkillRoot } | OperationError>> {
+  const list = Array.isArray(registered) ? registered.filter((item): item is string => typeof item === "string") : [];
+  const indexed: Array<{ root: SkillRoot } | OperationError> = [];
+  for (const workspace of list) indexed.push(await resolveWorkspaceTarget(workspace, list));
+  return indexed;
+}
+
+/**
+ * 按安装记录里保存的项目根重新解析可写根。记录只保存路径，不代表授权：
+ * 每次更新、回滚、卸载都要重新核对链接与重叠，路径失效时明确失败而不是回退到别处。
+ * 批量调用可传入同一次请求里已经解析好的登记索引，避免每个记录都重走全部工作区。
+ */
+export async function projectRootForRecord(projectRoot: unknown, registered?: string[], indexed?: Array<{ root: SkillRoot } | OperationError>): Promise<{ root: SkillRoot } | OperationError> {
+  if (typeof projectRoot !== "string" || !isAbsolute(projectRoot))
+    return { ok: false, error: "安装记录中的工作区路径无效", code: "error.workspace.unavailable" };
+  const saved = await nearestProjectRoot(projectRoot);
+  if (!saved?.root || !sameWorkspace(saved.root, projectRoot))
+    return { ok: false, error: `工作区目录不可用: ${projectRoot}`, code: "error.workspace.unavailable", params: { path: projectRoot } };
+  for (const target of indexed ?? await indexRegisteredWorkspaces(registered)) {
+    if ("root" in target && sameWorkspace(target.root.projectRoot!, projectRoot)) return target;
+  }
+  return { ok: false, error: "请选择已登记的工作区", code: "error.workspace.unregistered" };
+}
+
+/**
+ * 把「已登记工作区」解析成可写的项目 DSH 根。
+ * - 路径必须出现在宿主登记列表里；列表缺失或为空一律拒绝，不信任前端传来的路径。
+ * - 项目根沿用 projectRoots 的规则：最近 Git 根，没有则用该目录。
+ * - 只开放 .dsh/skills，沿用链接与用户目录重叠检查；解析本身不创建目录。
+ */
+export async function resolveWorkspaceTarget(
+  workspace: unknown,
+  registered: unknown,
+): Promise<{ root: SkillRoot } | OperationError> {
+  const unregistered: OperationError = {
+    ok: false,
+    error: "请选择已登记的工作区",
+    code: "error.workspace.unregistered",
+  };
+  if (typeof workspace !== "string" || !workspace.trim() || !isAbsolute(workspace.trim())) return unregistered;
+  const requested = workspace.trim();
+  const list = Array.isArray(registered)
+    ? registered.filter((item): item is string => typeof item === "string" && isAbsolute(item))
+    : [];
+  if (!list.some((item) => sameWorkspace(item, requested))) return unregistered;
+  const found = await nearestProjectRoot(requested);
+  if (!found || !found.root)
+    return {
+      ok: false,
+      error: `工作区目录不可用: ${requested}`,
+      code: "error.workspace.unavailable",
+      params: { path: requested },
+    };
+  const source = PROJECT_SOURCES.find((item) => item.key === "dsh")!;
+  const root: SkillRoot = {
+    key: `project-dsh:${projectIdentity(found.root)}`,
+    kind: "project-dsh",
+    scope: "project",
+    localeKey: source.localeKey,
+    label: source.label,
+    rank: source.rank,
+    mutable: true,
+    native: true,
+    toggleable: true,
+    path: join(found.root, source.directory, "skills"),
+    projectRoot: found.root,
+    projectName: basename(found.root) || found.root,
+    workspaceCwds: [found.cwd],
+  };
+  const checked = await checkedWritableRootDefinition(root);
+  if (!checked) return unregistered;
+  if (checked.ok === false) return checked;
+  return { root: checked as SkillRoot };
+}
+
 export function managerHomePath() {
   return join(resolveDshHome(), "skills-manager");
 }
@@ -603,14 +696,14 @@ function rootByKey(key: string): SkillRoot | null | undefined {
   return userRoots().find((item) => item.key === key) || null;
 }
 
-/** 只允许用户 DSH 根，或由活动 Session 推导出的项目 DSH 根参与文件写入。 */
-function writableRootDefinition(root: RootInput, allowRepositoryRoot = false) {
+/** 只允许用户 DSH、Shared Agent，或由活动 Session 推导出的项目 DSH 根参与文件写入。 */
+function writableRootDefinition(root: RootInput) {
   const definition = rootDefinition(root);
-  // 普通管理页仍只写 DSH。仓库安装只能额外写入已核对的公共 Agent 目录。
-  if (allowRepositoryRoot && definition?.key === "agents") {
+  // Shared Agent 统一开放管理，但仍必须是当前配置的规范目录。
+  if (definition?.key === "agents") {
     const canonical = rootByKey("agents");
     return canonical && resolve(definition.path) === resolve(canonical.path)
-      ? { ...canonical, mutable: true }
+      ? canonical
       : null;
   }
   if (!definition || definition.mutable !== true) return null;
@@ -632,17 +725,20 @@ function writableRootDefinition(root: RootInput, allowRepositoryRoot = false) {
   return definition;
 }
 
-async function checkedWritableRootDefinition(root: RootInput, allowRepositoryRoot = false): Promise<SkillRoot | OperationError | null | undefined> {
-  const definition = writableRootDefinition(root, allowRepositoryRoot);
-  if (definition && definition.scope !== "project" && allowRepositoryRoot) {
-    // 公共 Agent 的祖先目录也不能是链接，避免确认安装后写到配置路径之外。
-    for (let path = resolve(definition.path); ; path = dirname(path)) {
-      const st = await lstatOrNull(path);
-      if (st && (!st.isDirectory() || st.isSymbolicLink()))
-        return { ok: false, error: `技能目录不安全，拒绝写入: ${path}`, code: "error.root.unsafe", params: { path } };
-      if (dirname(path) === path) break;
-    }
+/** 用户级安装目标及 Shared Agent 普通写入均禁止祖先目录链接。 */
+async function checkedUserRootAncestors(definition: SkillRoot): Promise<SkillRoot | OperationError> {
+  for (let path = resolve(definition.path); ; path = dirname(path)) {
+    const st = await lstatOrNull(path);
+    if (st && (!st.isDirectory() || st.isSymbolicLink()))
+      return { ok: false, error: `技能目录不安全，拒绝写入: ${path}`, code: "error.root.unsafe", params: { path } };
+    if (dirname(path) === path) break;
   }
+  return definition;
+}
+
+async function checkedWritableRootDefinition(root: RootInput): Promise<SkillRoot | OperationError | null | undefined> {
+  const definition = writableRootDefinition(root);
+  if (definition?.key === "agents") return checkedUserRootAncestors(definition);
   if (!definition || definition.scope !== "project") return definition;
   if (await overlapsUserSkillRoot(definition.path)) {
     return {
@@ -667,13 +763,20 @@ async function checkedWritableRootDefinition(root: RootInput, allowRepositoryRoo
   return definition;
 }
 
+/** 仓库安装目标统一检查祖先路径；不改变普通 DSH 管理对迁移 Home 的兼容。 */
+export async function checkedRepositoryRootDefinition(root: RootInput): Promise<SkillRoot | OperationError | null | undefined> {
+  const definition = await checkedWritableRootDefinition(root);
+  if (!definition || definition.ok === false || definition.scope === "project" || definition.key === "agents") return definition;
+  return checkedUserRootAncestors(definition);
+}
+
 /** 仓库可选的安装位置：全局 DSH，以及已配置的公共 Agent 目录。 */
 export async function repositoryDestinations(): Promise<RepositoryDestination[]> {
   const result: RepositoryDestination[] = [];
   for (const root of userRoots().filter(item => item.key === "dsh" || item.key === "agents")) {
     let error: Diagnostic | undefined;
     try {
-      const checked = await checkedWritableRootDefinition(root, true);
+      const checked = await checkedRepositoryRootDefinition(root);
       if (!checked || checked.ok === false) error = checked || { code: "error.root.unsafe", error: "技能安装位置不可用" };
     } catch (caught) { const exception = caught as CodedError; error = { code: "error.root.unsafe", error: exception.message, params: { path: root.path } }; }
     result.push({ key: root.key as RepositoryDestination['key'], path: resolve(root.path), label: root.label, localeKey: root.localeKey, available: !error, ...(error ? { error } : {}) });
@@ -821,7 +924,7 @@ export function parseSkillDoc(text: string): ParsedSkill {
         const m = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(lines[i]);
         if (m) {
           fields.push({ key: m[1], raw: m[2] });
-          const block = /^([>|])[-+]?\s*$/.exec(m[2]);
+          const block = /^([>|])(?:([1-9])[-+]?|[-+]([1-9])?)?\s*$/.exec(m[2]);
           if (block) {
             const content = [];
             while (
@@ -831,13 +934,16 @@ export function parseSkillDoc(text: string): ParsedSkill {
               i++;
               content.push(lines[i]);
             }
-            const indentation = content
-              .filter((line) => line.trim() !== "")
-              .reduce(
-                (min, line) =>
-                  Math.min(min, (/^\s*/.exec(line) || [""])[0].length),
-                Infinity,
-              );
+            const explicitIndentation = block[2] || block[3];
+            const indentation = explicitIndentation
+              ? Number(explicitIndentation)
+              : content
+                  .filter((line) => line.trim() !== "")
+                  .reduce(
+                    (min, line) =>
+                      Math.min(min, (/^\s*/.exec(line) || [""])[0].length),
+                    Infinity,
+                  );
             const normalized = content.map((line) =>
               Number.isFinite(indentation)
                 ? line.slice(Math.min(indentation, line.length))
@@ -846,7 +952,9 @@ export function parseSkillDoc(text: string): ParsedSkill {
             map[m[1]] =
               block[1] === ">"
                 ? normalized.join(" ").replace(/\s+/g, " ").trim()
-                : normalized.join("\n").trim();
+                : explicitIndentation
+                  ? normalized.join("\n").replace(/^\n+|\n+$/g, "")
+                  : normalized.join("\n").trim();
           } else {
             map[m[1]] = decodeYamlScalar(m[2]);
           }
@@ -1039,7 +1147,7 @@ async function linkedDirectoryBundle(directory: string, name: string): Promise<D
 /** 按名称解析条目（bundle 优先，其次 flat）。找不到返回 null。 */
 export async function resolveEntry(root: RootInput, name: string): Promise<DiscoveredEntry | null> {
   const definition = rootDefinition(root);
-  if (definition && !definition.mutable) {
+  if (definition && (!definition.mutable || definition.key === "agents")) {
     if (!validDiscoveryName(name)) return null;
     return (
       (await discoverReadonlyEntries(definition.path)).entries.find(
@@ -1129,7 +1237,7 @@ function entryOf(name: string, kind: string, docPath: string, doc: Pick<ParsedSk
     });
   if (doc.hasFrontmatter && !declaredName)
     diagnostics.push({ level: "error", code: "diagnostic.name.missing" });
-  else if (declaredName && !KEBAB_RE.test(declaredName))
+  else if (declaredName && !KEBAB_RE.test(toKebab(declaredName)))
     diagnostics.push({
       level: "error",
       code: "diagnostic.name.invalid",
@@ -1154,7 +1262,7 @@ function entryOf(name: string, kind: string, docPath: string, doc: Pick<ParsedSk
     hasFrontmatter: doc.hasFrontmatter,
     // 调用策略值异常可以由 manager 本地策略覆盖；结构本身合法即可加载。
     loadable:
-      doc.hasFrontmatter && KEBAB_RE.test(declaredName) && description !== "",
+      doc.hasFrontmatter && description !== "" && KEBAB_RE.test(KEBAB_RE.test(declaredName) ? declaredName : toKebab(declaredName)),
     diagnostics,
   };
 }
@@ -1164,7 +1272,7 @@ export function scanEntries(root: RootInput, options: {metadataOnly: true}): Pro
 export function scanEntries(root: RootInput, options?: {metadataOnly?: false}): Promise<Scan>;
 export async function scanEntries(root: RootInput, options: {metadataOnly?: boolean} = {}): Promise<Scan | MetadataScan> {
   const definition = rootDefinition(root);
-  if (definition && !definition.mutable) {
+  if (definition && (!definition.mutable || definition.key === "agents")) {
     const discovered = await discoverReadonlyEntries(definition.path);
     if (options.metadataOnly) return discovered;
     const entries = [];
@@ -1325,11 +1433,11 @@ function defaultManagerState(): ManagerState {
   const disabledSkills: ManagerState["disabledSkills"] = Object.create(null);
   const enabledSkills: ManagerState["enabledSkills"] = Object.create(null);
   for (const root of userRoots()) {
-    if (root.key !== "dsh") sources[root.key] = true;
+    sources[root.key] = true;
     disabledSkills[root.key] = [];
     enabledSkills[root.key] = [];
   }
-  return { version: 1, sources, disabledSkills, enabledSkills };
+  return { version: 1, sources, disabledSkills, enabledSkills, categories: Object.create(null), categoryMembers: Object.create(null), categoryOrder: Object.create(null) };
 }
 
 function validStateSkillName(name: unknown): name is string {
@@ -1378,7 +1486,10 @@ function validManagerStateDocument(value: ManagerState) {
   )
     return false;
   for (const root of userRoots()) {
-    if (root.key === "dsh") continue;
+    if (root.key === "dsh") {
+      if (value.sources.dsh !== undefined && typeof value.sources.dsh !== "boolean") return false;
+      continue;
+    }
     if (typeof value.sources[root.key] !== "boolean") return false;
     const list = value.disabledSkills[root.key];
     if (!Array.isArray(list) || list.some((name) => !validStateSkillName(name)))
@@ -1432,7 +1543,6 @@ function normalizeManagerState(value: ManagerState) {
     return normalized;
   for (const root of userRoots()) {
     if (
-      root.key !== "dsh" &&
       value.sources &&
       typeof value.sources[root.key] === "boolean"
     )
@@ -1465,7 +1575,65 @@ function normalizeManagerState(value: ManagerState) {
       }
     }
   }
+  normalized.categories = normalizeCategories(value.categories);
+  normalized.categoryMembers = normalizeCategoryMembers(value.categoryMembers, normalized.categories);
+  normalized.categoryOrder = normalizeCategoryOrder(value.categoryOrder, normalized.categories);
   return normalized;
+}
+
+const CATEGORY_NAME_MAX = 24;
+
+function categoryRootKey(key: string) {
+  if (rootByKey(key) || PROJECT_ROOT_KEY_RE.test(key)) return key;
+  return null;
+}
+
+function normalizeCategories(value: ManagerState["categories"] | undefined) {
+  const categories: ManagerState["categories"] = Object.create(null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return categories;
+  for (const [key, list] of Object.entries(value)) {
+    if (!categoryRootKey(key) || !Array.isArray(list)) continue;
+    const seen = new Set<string>();
+    categories[key] = [];
+    for (const item of list) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const id = typeof item.id === "string" ? item.id : "";
+      const name = typeof item.name === "string" ? item.name.trim() : "";
+      if (!/^[a-z0-9]{8,32}$/.test(id) || !name || name.length > CATEGORY_NAME_MAX || seen.has(id)) continue;
+      seen.add(id);
+      categories[key].push({ id, name });
+    }
+  }
+  return categories;
+}
+
+function normalizeCategoryMembers(value: ManagerState["categoryMembers"] | undefined, categories: ManagerState["categories"]) {
+  const members: ManagerState["categoryMembers"] = Object.create(null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return members;
+  for (const [key, record] of Object.entries(value)) {
+    if (!categoryRootKey(key) || !record || typeof record !== "object" || Array.isArray(record)) continue;
+    const ids = new Set((categories[key] || []).map((item) => item.id));
+    members[key] = Object.create(null);
+    for (const [name, id] of Object.entries(record)) {
+      if (validStateSkillName(name) && typeof id === "string" && ids.has(id)) members[key][name] = id;
+    }
+  }
+  return members;
+}
+
+function normalizeCategoryOrder(value: ManagerState["categoryOrder"] | undefined, categories: ManagerState["categories"]) {
+  const order: ManagerState["categoryOrder"] = Object.create(null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return order;
+  for (const [key, groups] of Object.entries(value)) {
+    if (!categoryRootKey(key) || !groups || typeof groups !== "object" || Array.isArray(groups)) continue;
+    const validIds = new Set(["", ...(categories[key] || []).map((item) => item.id)]);
+    order[key] = Object.create(null);
+    for (const [id, names] of Object.entries(groups)) {
+      if (!validIds.has(id) || !Array.isArray(names)) continue;
+      order[key][id] = [...new Set(names.filter(validStateSkillName))];
+    }
+  }
+  return order;
 }
 
 export async function readManagerState(): Promise<PolicyResult> {
@@ -1526,7 +1694,6 @@ function effectiveSkillPolicy(policyResult: PolicyResult, root: SkillRoot, entry
     entry.policyAliases,
   );
   const sourceEnabled =
-    root.key === "dsh" ||
     root.kind === "project-dsh" ||
     policyResult.state.sources[root.key] !== false;
   if (policyResult.writable === false || !sourceEnabled || override === false) {
@@ -1571,7 +1738,7 @@ export async function setSourceEnabled(key: string, enabled: boolean, log?: Log,
   let root = rootByKey(key);
   if (!root && PROJECT_ROOT_KEY_RE.test(key) && !key.startsWith("project-dsh:"))
     root = (await projectRoots(options.projectCwds)).find((item) => item.key === key);
-  if (!root || root.key === "dsh" || root.kind === "project-dsh" || !root.toggleable)
+  if (!root || root.kind === 'project-dsh' || !root.toggleable)
     return readonlyError("toggle");
   const current = await readManagerState();
   if (current.writable === false) return invalidManagerStateWrite();
@@ -1622,14 +1789,11 @@ async function checkedPolicyRootDefinition(root: RootInput): Promise<SkillRoot |
   return definition;
 }
 
-async function setPolicySkillEnabled(root: RootInput, name: string, enabled: boolean, log?: Log) {
-  const definition = await checkedPolicyRootDefinition(root);
-  if (definition && definition.ok === false) return definition;
-  if (!definition) return readonlyError("toggle");
+async function applyPolicySkillEnabled(definition: SkillRoot, name: string, enabled: boolean, state: ManagerState) {
   const resolved = await resolveEntry(definition, name);
   if (resolved === null)
     return {
-      ok: false,
+      ok: false as const,
       error: `技能不存在: ${name}`,
       code: "error.skill.notFound",
       params: { name },
@@ -1646,7 +1810,7 @@ async function setPolicySkillEnabled(root: RootInput, name: string, enabled: boo
     );
   } catch {
     return {
-      ok: false,
+      ok: false as const,
       error: `技能不存在: ${name}`,
       code: "error.skill.notFound",
       params: { name },
@@ -1654,7 +1818,7 @@ async function setPolicySkillEnabled(root: RootInput, name: string, enabled: boo
   }
   if (!summary.hasFrontmatter) {
     return {
-      ok: false,
+      ok: false as const,
       error: `技能缺少完整 frontmatter，无法${enabled ? "启用" : "停用"}: ${name}`,
       code: "error.skill.noFrontmatter",
       params: { name, action: enabled ? "enable" : "disable" },
@@ -1662,18 +1826,14 @@ async function setPolicySkillEnabled(root: RootInput, name: string, enabled: boo
   }
   if (!summary.loadable) {
     return {
-      ok: false,
+      ok: false as const,
       error: `技能结构不完整，无法${enabled ? "启用" : "停用"}: ${name}`,
       code: "error.skill.notLoadable",
       params: { name, action: enabled ? "enable" : "disable" },
     };
   }
-  const current = await readManagerState();
-  if (current.writable === false) return invalidManagerStateWrite();
-  const disabled = new Set(current.state.disabledSkills[definition.key] || []);
-  const explicitlyEnabled = new Set(
-    current.state.enabledSkills[definition.key] || [],
-  );
+  const disabled = new Set(state.disabledSkills[definition.key] || []);
+  const explicitlyEnabled = new Set(state.enabledSkills[definition.key] || []);
   if (enabled) {
     disabled.delete(name);
     explicitlyEnabled.add(name);
@@ -1681,15 +1841,26 @@ async function setPolicySkillEnabled(root: RootInput, name: string, enabled: boo
     explicitlyEnabled.delete(name);
     disabled.add(name);
   }
-  current.state.disabledSkills[definition.key] = [...disabled].sort();
-  current.state.enabledSkills[definition.key] = [...explicitlyEnabled].sort();
+  state.disabledSkills[definition.key] = [...disabled].sort();
+  state.enabledSkills[definition.key] = [...explicitlyEnabled].sort();
+  return { root: definition.key, name, enabled: enabled === true };
+}
+
+async function setPolicySkillEnabled(root: RootInput, name: string, enabled: boolean, log?: Log) {
+  const definition = await checkedPolicyRootDefinition(root);
+  if (definition && definition.ok === false) return definition;
+  if (!definition) return readonlyError("toggle");
+  const current = await readManagerState();
+  if (current.writable === false) return invalidManagerStateWrite();
+  const result = await applyPolicySkillEnabled(definition, name, enabled, current.state);
+  if (result && result.ok === false) return result;
   await writeManagerState(current.state);
   if (log)
     log(
       enabled ? "policy-enable" : "policy-disable",
       `${enabled ? "启用" : "停用"} ${definition.key}/${name}（本地策略，源文件不变）`,
     );
-  return { root: definition.key, name, enabled: enabled === true };
+  return result;
 }
 
 // ── 启用 / 停用（同时控制模型与 / 手动调用，非破坏）──────────────────────────
@@ -1697,6 +1868,187 @@ async function setPolicySkillEnabled(root: RootInput, name: string, enabled: boo
 /** enabled=true 恢复模型与 / 手动调用；false 同时停用两种调用入口。 */
 export async function setSkillEnabled(root: RootInput, name: string, enabled: boolean, log?: Log) {
   return setPolicySkillEnabled(root, name, enabled, log);
+}
+
+function categoryError(code: string, error: string, params?: Record<string, unknown>): OperationError {
+  return { ok: false, code, error, ...(params ? { params } : {}) };
+}
+
+async function resolvedCategoryRoot(key: string, options: ScopeOptions = {}) {
+  const rootKey = categoryRootKey(key);
+  if (!rootKey) return null;
+  const user = rootByKey(rootKey);
+  if (user) return user;
+  if (!PROJECT_ROOT_KEY_RE.test(rootKey)) return null;
+  return (await projectRoots(options.projectCwds)).find((item) => item.key === rootKey) || null;
+}
+
+async function writableCategoryState(key: string, options: ScopeOptions = {}) {
+  const root = await resolvedCategoryRoot(key, options);
+  if (!root) return categoryError("error.category.root", `技能来源不存在: ${key}`, { root: key });
+  const current = await readManagerState();
+  if (current.writable === false) return invalidManagerStateWrite();
+  if (!current.state.categories[root.key]) current.state.categories[root.key] = [];
+  if (!current.state.categoryMembers[root.key]) current.state.categoryMembers[root.key] = Object.create(null);
+  if (!current.state.categoryOrder[root.key]) current.state.categoryOrder[root.key] = Object.create(null);
+  return { rootKey: root.key, root, state: current.state };
+}
+
+export async function createCategory(key: string, name: string, log?: Log, options: ScopeOptions = {}) {
+  const ready = await writableCategoryState(key, options);
+  if ("ok" in ready) return ready;
+  const label = String(name || "").trim();
+  if (!label || label.length > CATEGORY_NAME_MAX)
+    return categoryError("error.category.name", "分类名称不能为空，且不能超过 24 个字符");
+  if (ready.state.categories[ready.rootKey].some((item) => item.name === label))
+    return categoryError("error.category.duplicate", `已有同名分类: ${label}`, { name: label });
+  const category = { id: randomBytes(8).toString("hex"), name: label };
+  ready.state.categories[ready.rootKey].push(category);
+  ready.state.categoryOrder[ready.rootKey][category.id] = [];
+  await writeManagerState(ready.state);
+  if (log) log("category-create", `在 ${ready.rootKey} 添加分类 ${label}`);
+  return { root: ready.rootKey, category };
+}
+
+export async function renameCategory(key: string, id: string, name: string, log?: Log, options: ScopeOptions = {}) {
+  const ready = await writableCategoryState(key, options);
+  if ("ok" in ready) return ready;
+  const label = String(name || "").trim();
+  const list = ready.state.categories[ready.rootKey];
+  const category = list.find((item) => item.id === id);
+  if (!category) return categoryError("error.category.notFound", "分类不存在", { id });
+  if (!label || label.length > CATEGORY_NAME_MAX)
+    return categoryError("error.category.name", "分类名称不能为空，且不能超过 24 个字符");
+  if (list.some((item) => item !== category && item.name === label))
+    return categoryError("error.category.duplicate", `已有同名分类: ${label}`, { name: label });
+  category.name = label;
+  await writeManagerState(ready.state);
+  if (log) log("category-rename", `重命名 ${ready.rootKey} 分类为 ${label}`);
+  return { root: ready.rootKey, category };
+}
+
+export async function deleteCategory(key: string, id: string, log?: Log, options: ScopeOptions = {}) {
+  const ready = await writableCategoryState(key, options);
+  if ("ok" in ready) return ready;
+  const list = ready.state.categories[ready.rootKey];
+  if (!list.some((item) => item.id === id)) return categoryError("error.category.notFound", "分类不存在", { id });
+  ready.state.categories[ready.rootKey] = list.filter((item) => item.id !== id);
+  delete ready.state.categoryOrder[ready.rootKey][id];
+  for (const [skillName, categoryId] of Object.entries(ready.state.categoryMembers[ready.rootKey])) {
+    if (categoryId === id) delete ready.state.categoryMembers[ready.rootKey][skillName];
+  }
+  await writeManagerState(ready.state);
+  if (log) log("category-delete", `删除 ${ready.rootKey} 分类 ${id}，技能留在未分类`);
+  return { root: ready.rootKey, id };
+}
+
+export async function assignSkillCategory(key: string, skillName: string, categoryId: string, log?: Log, options: ScopeOptions = {}) {
+  const ready = await writableCategoryState(key, options);
+  if ("ok" in ready) return ready;
+  if (!validStateSkillName(skillName))
+    return categoryError("error.skill.notFound", `技能不存在: ${skillName}`, { name: skillName });
+  if (categoryId) {
+    const entry = await resolveEntry(ready.root, skillName);
+    if (!entry)
+      return categoryError("error.skill.notFound", `技能不存在: ${skillName}`, { name: skillName });
+    if (!ready.state.categories[ready.rootKey].some((item) => item.id === categoryId))
+      return categoryError("error.category.notFound", "分类不存在", { id: categoryId });
+    const previousId = ready.state.categoryMembers[ready.rootKey][skillName] || "";
+    if (previousId !== categoryId) {
+      ready.state.categoryOrder[ready.rootKey][previousId] = (ready.state.categoryOrder[ready.rootKey][previousId] || []).filter((name) => name !== skillName);
+      const targetOrder = ready.state.categoryOrder[ready.rootKey][categoryId] || [];
+      if (!targetOrder.includes(skillName)) targetOrder.push(skillName);
+      ready.state.categoryOrder[ready.rootKey][categoryId] = targetOrder;
+    }
+    ready.state.categoryMembers[ready.rootKey][skillName] = categoryId;
+  } else {
+    const previousId = ready.state.categoryMembers[ready.rootKey][skillName] || "";
+    if (previousId) {
+      ready.state.categoryOrder[ready.rootKey][previousId] = (ready.state.categoryOrder[ready.rootKey][previousId] || []).filter((name) => name !== skillName);
+      const looseOrder = ready.state.categoryOrder[ready.rootKey][""] || [];
+      if (!looseOrder.includes(skillName)) looseOrder.push(skillName);
+      ready.state.categoryOrder[ready.rootKey][""] = looseOrder;
+    }
+    delete ready.state.categoryMembers[ready.rootKey][skillName];
+  }
+  await writeManagerState(ready.state);
+  if (log) log("category-assign", `${ready.rootKey}/${skillName} 归入 ${categoryId || "未分类"}`);
+  return { root: ready.rootKey, name: skillName, categoryId: categoryId || null };
+}
+
+export async function moveSkillInCategory(key: string, skillName: string, categoryId: string, targetName?: string, position: string = "before", log?: Log, options: ScopeOptions = {}) {
+  const ready = await writableCategoryState(key, options);
+  if ("ok" in ready) return ready;
+  if (!validStateSkillName(skillName))
+    return categoryError("error.skill.notFound", `技能不存在: ${skillName}`, { name: skillName });
+  if (categoryId && !ready.state.categories[ready.rootKey].some((item) => item.id === categoryId))
+    return categoryError("error.category.notFound", "分类不存在", { id: categoryId });
+  if (position !== "before" && position !== "after")
+    return categoryError("error.category.position", "技能排序位置无效");
+
+  const entries = (await scanEntries(ready.root)).entries.map((entry) => entry.name);
+  if (!entries.includes(skillName))
+    return categoryError("error.skill.notFound", `技能不存在: ${skillName}`, { name: skillName });
+  if (targetName && (!validStateSkillName(targetName) || !entries.includes(targetName)))
+    return categoryError("error.skill.notFound", `排序目标不存在: ${targetName}`, { name: targetName });
+
+  const members = ready.state.categoryMembers[ready.rootKey];
+  const orders = ready.state.categoryOrder[ready.rootKey];
+  const previousId = members[skillName] || "";
+  const orderedNames = (id: string) => {
+    const available = entries.filter((name) => (members[name] || "") === id).sort((a, b) => a.localeCompare(b));
+    const availableSet = new Set(available);
+    const saved = (orders[id] || []).filter((name) => availableSet.has(name));
+    return [...saved, ...available.filter((name) => !saved.includes(name))];
+  };
+  if (targetName && (members[targetName] || "") !== categoryId)
+    return categoryError("error.category.target", "排序目标不属于目标分类", { name: targetName, category: categoryId });
+
+  const sourceOrder = orderedNames(previousId).filter((name) => name !== skillName);
+  const targetOrder = previousId === categoryId ? sourceOrder : orderedNames(categoryId).filter((name) => name !== skillName);
+  let index = targetName ? targetOrder.indexOf(targetName) : -1;
+  if (index < 0) index = targetOrder.length;
+  else if (position === "after") index += 1;
+  targetOrder.splice(index, 0, skillName);
+
+  if (previousId !== categoryId) orders[previousId] = sourceOrder;
+  orders[categoryId] = targetOrder;
+  if (categoryId) members[skillName] = categoryId;
+  else delete members[skillName];
+  await writeManagerState(ready.state);
+  if (log) log("category-order", `${ready.rootKey}/${skillName} 移至 ${categoryId || "未分类"} ${position} ${targetName || "末尾"}`);
+  return { root: ready.rootKey, name: skillName, categoryId: categoryId || null, order: targetOrder };
+}
+
+export async function setCategoryEnabled(key: string, categoryId: string, enabled: boolean, log?: Log, options: ScopeOptions = {}) {
+  const ready = await writableCategoryState(key, options);
+  if ("ok" in ready) return ready;
+  const root = ready.root;
+  if (categoryId && categoryId !== "*" && !ready.state.categories[ready.rootKey].some((item) => item.id === categoryId))
+    return categoryError("error.category.notFound", "分类不存在", { id: categoryId });
+  const scanned = (await scanEntries(root)).entries.map((entry) => entry.name);
+  const members = ready.state.categoryMembers[ready.rootKey];
+  const names = categoryId === "*"
+    ? scanned
+    : categoryId
+      ? Object.entries(members).filter(([, id]) => id === categoryId).map(([name]) => name)
+      : scanned.filter((name) => !members[name]);
+  const skipped: string[] = [];
+  const changedNames: string[] = [];
+  for (const name of names) {
+    const result = await applyPolicySkillEnabled(root, name, enabled, ready.state);
+    if (result && result.ok === false) {
+      if (result.code === "error.skill.notLoadable" || result.code === "error.skill.noFrontmatter") skipped.push(name);
+      else if (result.code !== "error.skill.notFound") return result;
+      continue;
+    }
+    changedNames.push(name);
+  }
+  if (changedNames.length) await writeManagerState(ready.state);
+  if (log)
+    for (const name of changedNames)
+      log(enabled ? "policy-enable" : "policy-disable", `${enabled ? "启用" : "停用"} ${ready.rootKey}/${name}（本地策略，源文件不变）`);
+  return { root: ready.rootKey, categoryId: categoryId || null, enabled: enabled === true, changed: changedNames.length, skipped };
 }
 
 async function safeExistingEntryPaths(root: string, name: string) {
@@ -1789,11 +2141,11 @@ function trashRootMetadata(definition: SkillRoot) {
   };
 }
 
-async function restoreRootDefinition(metadata: TrashMetadata, options: ScopeOptions = {}): Promise<SkillRoot | OperationError | null | undefined> {
+async function restoreRootDefinition(metadata: TrashMetadata, options: MutationOptions = {}): Promise<SkillRoot | OperationError | null | undefined> {
   // version 1 entries predate scoped Trash and always belong to $DSH_HOME/skills.
   if (!metadata.root) return rootByKey("dsh");
   if (metadata.root.scope === "user" && rootByKey(metadata.root.key))
-    return checkedWritableRootDefinition(rootByKey(metadata.root.key), metadata.root.key !== "dsh");
+    return checkedWritableRootDefinition(rootByKey(metadata.root.key));
   if (
     metadata.root.scope !== "project" ||
     metadata.root.kind !== "project-dsh" ||
@@ -1807,14 +2159,10 @@ async function restoreRootDefinition(metadata: TrashMetadata, options: ScopeOpti
       code: "error.trash.invalid",
       params: { id: metadata.id },
     };
-  const roots = await projectRoots(options.projectCwds);
-  const normalizedProjectRoot = pathIdentity(metadata.root.projectRoot);
-  const root = roots.find(
-    (item) =>
-      item.key === metadata.root!.key &&
-      item.kind === "project-dsh" &&
-      pathIdentity(item.projectRoot!) === normalizedProjectRoot,
-  );
+  const target = await projectRootForRecord(metadata.root.projectRoot, options.registeredWorkspaces);
+  if (!("root" in target)) return target;
+  const scopedRoots = options.projectCwds === undefined ? null : await projectRoots(options.projectCwds);
+  const root = target.root.key === metadata.root.key && (!scopedRoots || scopedRoots.some(item => item.key === target.root.key)) ? target.root : null;
   if (!root) {
     return {
       ok: false,
@@ -1828,7 +2176,7 @@ async function restoreRootDefinition(metadata: TrashMetadata, options: ScopeOpti
 
 /** 把用户或活动项目的 DSH 根中的单个技能移入 manager-owned 回收站。 */
 export async function deleteSkill(root: RootInput, name: string, log?: Log, options: MutationOptions = {}) {
-  const definition = await checkedWritableRootDefinition(root, options.allowRepositoryRoot === true);
+  const definition = await checkedWritableRootDefinition(root);
   if (definition && definition.ok === false) return definition;
   if (!definition) return readonlyError("delete");
   const resolved = await resolveEntry(definition, name);
@@ -1848,7 +2196,13 @@ export async function deleteSkill(root: RootInput, name: string, log?: Log, opti
     const bundle = entryPath(definition.path, name);
     if (bundle && (await isDirectoryLink(bundle))) return linkedWriteError(bundle);
   }
-  const id = options.repositoryTrash?.id || `${Date.now()}-${randomUUID()}`;
+  if (definition.key === "agents") {
+    for (const target of targets) {
+      if ((await lstatOrNull(target.path))?.isSymbolicLink())
+        return { ok: false, error: `技能目录不安全，拒绝写入: ${target.path}`, code: "error.root.unsafe", params: { path: target.path } };
+    }
+  }
+  const id = options.repositoryTrash?.id || options.catalogTrash?.id || `${Date.now()}-${randomUUID()}`;
   if (!/^\d+-[a-f0-9-]{36}$/.test(id)) throw codedError("回收站条目编号非法", "error.trash.invalid", { id });
   const trashRoot = trashRootPath();
   const stage = join(trashRoot, `.stage-${randomUUID()}`);
@@ -1878,6 +2232,7 @@ export async function deleteSkill(root: RootInput, name: string, log?: Log, opti
       entries: moved.map((item) => item.fileName),
       root: trashRootMetadata(definition),
       ...(options.repositoryTrash ? { repository: options.repositoryTrash.repository } : {}),
+      ...(options.catalogTrash ? { catalog: options.catalogTrash.ids } : {}),
     };
     await fs.writeFile(
       join(stage, "metadata.json"),
@@ -2005,6 +2360,25 @@ export async function restoreTrash(id: string, log?: Log, options: MutationOptio
   }
 }
 
+async function forgetCategoryMember(metadata: TrashMetadata) {
+  // 回收站目录已经删除。这里单独再写一次状态；写入失败时成员记录会留下，同名新建可能回到旧分类。不再回滚已删除的回收站目录。
+  const key = metadata.root?.key;
+  if (!key || !validStateSkillName(metadata.name)) return;
+  const current = await readManagerState();
+  if (current.writable === false) return;
+  const members = current.state.categoryMembers[key];
+  const orders = current.state.categoryOrder[key];
+  const hasMember = !!(members && members[metadata.name]);
+  const hasOrder = !!(orders && Object.values(orders).some((names) => names.includes(metadata.name)));
+  if (!hasMember && !hasOrder) return;
+  if (members) delete members[metadata.name];
+  if (orders) {
+    for (const id of Object.keys(orders))
+      orders[id] = orders[id].filter((name) => name !== metadata.name);
+  }
+  await writeManagerState(current.state);
+}
+
 export async function permanentlyDeleteTrash(id: string, log?: Log) {
   const metadata = await readTrashMetadata(id);
   if (!metadata)
@@ -2015,6 +2389,7 @@ export async function permanentlyDeleteTrash(id: string, log?: Log) {
       params: { id },
     };
   await fs.rm(join(trashRootPath(), id), { recursive: true, force: true });
+  await forgetCategoryMember(metadata);
   if (log) log("trash-delete", `永久删除回收站条目 ${metadata.name} (${id})`);
   return { id, name: metadata.name };
 }
@@ -2278,7 +2653,7 @@ async function replaceWithCopy(source: string, dest: string, isDir: boolean, exi
  */
 export async function importSkill(source: string, log?: Log, options: MutationOptions = {}): Promise<ImportResult> {
   const requestedRoot = Object.prototype.hasOwnProperty.call(options, "root") ? options.root : rootByKey("dsh");
-  const definition = await checkedWritableRootDefinition(requestedRoot, options.allowRepositoryRoot === true);
+  const definition = await checkedWritableRootDefinition(requestedRoot);
   if (definition && definition.ok === false) return definition;
   if (!definition) return readonlyError("create");
   const targetRoot = definition.path;
@@ -2427,6 +2802,8 @@ export async function importSkill(source: string, log?: Log, options: MutationOp
     if (pending.length === 0 && conflicts.length === 0) return failureResult();
     return { kind: analysis.kind, pending, conflicts, failed };
   }
+
+  if (!dryRun && options.beforeImport) await options.beforeImport(pending, conflicts, failed);
 
   if (
     pending.length > 0 ||
@@ -2784,9 +3161,9 @@ export async function createSkill(input: CreateInput, log?: Log, options: Mutati
   return { name, path: join(target, "SKILL.md"), root: definition.key };
 }
 
-export async function skillDetail(key: string, name: string, options: ScopeOptions = {}) {
+export async function skillDetail(key: string, name: string, options: ScopeOptions & { workspaceBound?: boolean } = {}) {
   const scopedRoots = await projectRoots(options.projectCwds);
-  const root = rootByKey(key) || scopedRoots.find((item) => item.key === key);
+  const root = options.workspaceBound ? scopedRoots.find((item) => item.key === key) : rootByKey(key) || scopedRoots.find((item) => item.key === key);
   if (!root)
     return {
       ok: false,
@@ -2833,7 +3210,7 @@ export async function skillDetail(key: string, name: string, options: ScopeOptio
   };
 }
 
-/** 选择未停用的最高优先级副本；全部停用时输出阻断候选覆盖原生扫描。 */
+/** 选择未停用的最高优先级副本；全部停用时保留原生覆盖或显式禁用阻断。 */
 export async function listProviderCandidates(options: ScopeOptions = {}) {
   const policyResult = await readManagerState();
   const candidates = [];
@@ -2853,12 +3230,14 @@ export async function listProviderCandidates(options: ScopeOptions = {}) {
   }
   for (const group of groupLoadableSkillsByName(items).values()) {
     const { root, entry, policy } = selectSkillWinner(group);
-    // 关闭的外部来源不覆盖其他插件；同名组内的原生副本及分发链接仍需禁用覆盖。
+    // 关闭的外部来源不覆盖其他插件；原生副本、分发链接及显式单技能禁用仍需阻断。
     const hasNativeCopy = group.some(({ root, entry }) => root.native ||
       entry.policyAliases?.some((alias) => user.some((item) => item.key === alias.rootKey && item.native)));
-    if (!hasNativeCopy && !policy.sourceEnabled) continue;
+    const hasExplicitDisable = group.some((item) => item.policy.override === false);
+    if (!hasNativeCopy && !hasExplicitDisable && !policy.sourceEnabled) continue;
     const project = root.scope === "project";
-    const policyOnly = root.mutable;
+    // Shared Agent 继续由 manager 提供递归发现与链接副本，不因开放文件管理而丢失调用候选。
+    const policyOnly = root.mutable && root.key !== "agents";
     // 回退副本也必须覆盖组内更高优先级的原生条目，防止宿主重新选中已停用副本。
     const overlayRank = group.length > 1
       ? Math.min(...group.map((item) => Math.min(item.root.rank, item.entry.providerRank ?? item.root.rank))) - 1
@@ -2871,7 +3250,7 @@ export async function listProviderCandidates(options: ScopeOptions = {}) {
       policyResult.writable === false;
     if (!needsOverlay) continue;
     candidates.push({
-      name: entry.declaredName,
+      name: canonicalSkillName({ root, entry, policy }),
       description: entry.description,
       invocation: {
         modelInvocable: policy.modelInvocable,
@@ -2948,8 +3327,9 @@ export async function getProviderSkill(candidate: ProviderCandidate, options: Sc
       await fs.readFile(entry.realDocPath || entry.docPath, "utf8"),
     );
     const summary = entryOf(locator.entryName, entry.kind, entry.docPath, doc);
-    if (!summary.loadable || summary.declaredName !== candidate.name)
-      return undefined;
+    if (!summary.loadable) return undefined;
+    const invocationName = KEBAB_RE.test(summary.declaredName) ? summary.declaredName : toKebab(summary.declaredName);
+    if (invocationName !== candidate.name && summary.declaredName !== candidate.name) return undefined;
     return {
       name: candidate.name,
       description: candidate.description,
@@ -2969,7 +3349,10 @@ export async function getProviderSkill(candidate: ProviderCandidate, options: Sc
 // ── 状态快照 ────────────────────────────────────────────────────────────────
 
 function canonicalSkillName(item: SkillItem) {
-  return item.entry.declaredName || item.entry.name;
+  const declared = item.entry.declaredName || "";
+  if (KEBAB_RE.test(declared)) return declared;
+  const kebab = toKebab(declared);
+  return kebab || declared || item.entry.name;
 }
 
 /** 真实路径去重后按声明名分组；管理页与当前工作区 provider 共用来源优先级。 */
@@ -3026,6 +3409,86 @@ function markWinners(items: ViewItem[]) {
 }
 
 /** DSH、常见 Agent 与活动 Session 项目根的技能快照。 */
+/** 项目页折叠行：一个项目根一行，只含名称、路径与技能数量，不读取技能正文。 */
+export interface WorkspaceRow {
+  name: string;
+  path: string;
+  projectRoot?: string;
+  registeredPaths: string[];
+  available: boolean;
+  skillCount: number;
+}
+
+/**
+ * 按宿主登记的全部工作区生成折叠列表。子目录与仓库根解析到同一项目根时合并成一行；
+ * 目录已不存在的登记项单独成行并标为不可用，不让整页失败。
+ */
+export async function listWorkspaces(registered: unknown): Promise<WorkspaceRow[]> {
+  const paths = Array.isArray(registered)
+    ? registered.filter((item): item is string => typeof item === "string" && isAbsolute(item))
+    : [];
+  const rows = new Map<string, WorkspaceRow & { roots: SkillRoot[] }>();
+  for (const path of paths) {
+    const found = await nearestProjectRoot(path);
+    if (!found || !found.root) {
+      const key = `missing:${pathIdentity(path)}`;
+      if (!rows.has(key))
+        rows.set(key, { name: basename(path) || path, path, registeredPaths: [path], available: false, skillCount: 0, roots: [] });
+      continue;
+    }
+    const key = pathIdentity(found.root);
+    const existing = rows.get(key);
+    if (existing) {
+      if (!existing.registeredPaths.some((item) => sameWorkspace(item, path))) existing.registeredPaths.push(path);
+      continue;
+    }
+    rows.set(key, {
+      name: basename(found.root) || found.root,
+      path: found.root,
+      projectRoot: found.root,
+      registeredPaths: [path],
+      available: true,
+      skillCount: 0,
+      roots: await projectRoots([found.cwd]),
+    });
+  }
+  for (const row of rows.values()) {
+    if (row.roots.length) {
+      // 折叠行只需要数量：走仅元数据扫描，不解析正文。
+      const scans = await scanDeduplicatedRoots(row.roots, { metadataOnly: true });
+      row.skillCount = [...scans.values()].reduce((total, scan) => total + scan.entries.length, 0);
+    }
+  }
+  return [...rows.values()]
+    .map(({ roots: _roots, ...row }) => row)
+    .sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+}
+
+/**
+ * 展开某个已登记工作区：只扫描该项目，覆盖关系按该项目与用户级副本计算，
+ * 不混入其他项目的来源。路径必须在登记列表内，否则与写入口一样拒绝。
+ */
+export async function workspaceSkills(workspace: unknown, registered: unknown) {
+  const unregistered: OperationError = { ok: false, error: "请选择已登记的工作区", code: "error.workspace.unregistered" };
+  if (typeof workspace !== "string" || !workspace.trim() || !isAbsolute(workspace.trim())) return unregistered;
+  const requested = workspace.trim();
+  const list = Array.isArray(registered)
+    ? registered.filter((item): item is string => typeof item === "string" && isAbsolute(item))
+    : [];
+  if (!list.some((item) => sameWorkspace(item, requested))) return unregistered;
+  const found = await nearestProjectRoot(requested);
+  if (!found || !found.root)
+    return { ok: false, error: `工作区目录不可用: ${requested}`, code: "error.workspace.unavailable", params: { path: requested } } as OperationError;
+  const snapshot = await state({ projectCwds: [found.cwd] });
+  const identity = pathIdentity(found.root);
+  const roots = snapshot.roots.filter((root) => root.scope === "project" && root.projectRoot && pathIdentity(root.projectRoot) === identity);
+  return {
+    project: { root: found.root, name: basename(found.root) || found.root, workspaceCwds: [found.cwd] },
+    roots,
+    warnings: snapshot.warnings,
+  };
+}
+
 export async function state(options: ScopeOptions = {}) {
   const user = userRoots();
   const userScans = await scanDeduplicatedRoots(user);
@@ -3035,6 +3498,8 @@ export async function state(options: ScopeOptions = {}) {
   const trash = await listTrash();
   const result = {
     roots: [] as RootView[],
+    // 创建、导入、仓库安装共用的用户级写入位置，由后端校验过可写性。
+    writeDestinations: await repositoryDestinations(),
     projects: [] as {root?: string; name?: string; workspaceCwds?: string[]}[],
     summary: {total: 0, enabled: 0, disabled: 0, issues: 0},
     trash,
@@ -3082,6 +3547,7 @@ export async function state(options: ScopeOptions = {}) {
         diagnostics: e.diagnostics,
         path: e.docPath,
         linked: e.linked === true,
+        categoryId: policyResult.state.categoryMembers[root.key]?.[e.name] || null,
       });
       all.push({
         root,
@@ -3113,10 +3579,11 @@ export async function state(options: ScopeOptions = {}) {
       truncated: truncated === true,
       enabled:
         policyResult.writable !== false &&
-        (root.key === "dsh" ||
-          root.kind === "project-dsh" ||
+        (root.kind === "project-dsh" ||
           policyResult.state.sources[root.key] !== false),
       skills,
+      categories: policyResult.state.categories[root.key] || [],
+      categoryOrder: policyResult.state.categoryOrder[root.key] || {},
     });
   }
   const userItems = all.filter((item) => item.root.scope !== "project");
@@ -3164,4 +3631,4 @@ export type ProviderCandidate = Awaited<ReturnType<typeof listProviderCandidates
 type SourceAnalysis = ({kind: "none"} & Diagnostic) | ({kind: "single"; skillFile: string} & ImportCandidate) | {kind: "batch"; rawName: string; source: string; isDir: boolean};
 type MetadataEntry = DiscoveredEntry & {name: string; providerRank?: number; policyAliases?: {rootKey: string; name: string}[]};
 interface MetadataScan {exists: boolean; entries: MetadataEntry[]; truncated?: boolean}
-interface TrashMetadata { id: string; name: string; deletedAt: string; repository?: {id: string; path: string}; root?: {key: string; scope: string; label: string; localeKey?: string; projectRoot?: string; projectName?: string; kind?: string}; entries: string[] }
+interface TrashMetadata { id: string; name: string; deletedAt: string; repository?: {id: string; path: string}; catalog?: string[]; root?: {key: string; scope: string; label: string; localeKey?: string; projectRoot?: string; projectName?: string; kind?: string}; entries: string[] }

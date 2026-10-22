@@ -12,7 +12,8 @@ process.env.HOME = process.env.USERPROFILE = join(sandbox, "user");
 for (const agent of ['CODEX', 'CLAUDE', 'GEMINI', 'OPENCODE', 'CURSOR', 'COPILOT', 'WINDSURF', 'WINDSURF_USER', 'TRAE', 'TRAE_CN', 'OPENCLAW', 'CLAWDBOT', 'ROO', 'CODEBUDDY', 'WORKBUDDY', 'QODER', 'QODER_CN', 'LINGMA'])
   process.env[`DSH_${agent}_HOME`] = join(sandbox, `configured-${agent.toLowerCase()}`);
 const { createRepositoryManager } = await import("../lib/repositories.js");
-const { userRoots, state, listTrash, permanentlyDeleteTrash, deleteSkill, importUploadedSkill } = await import("../lib/core.js");
+const { installationSourceKey } = await import("../lib/repository-updates.js");
+const { userRoots, repositoryDestinations, state, listTrash, permanentlyDeleteTrash, deleteSkill, importUploadedSkill } = await import("../lib/core.js");
 const doc = name => strToU8(`---\nname: ${name}\ndescription: Test install destinations\n---\nTest instructions\n`);
 let archive;
 const snapshot = text => zipSync({
@@ -56,13 +57,16 @@ try {
   assert.equal((await skill("shared-demo")).installedRoot, "agents");
   assert.equal((await skill("shared-demo")).status, "installed");
   assert.equal((await skill("shared-demo")).canUninstall, true);
-  assert.equal((await manager.sources())["shared-demo"].root, "agents");
+  assert.equal((await manager.sources())[installationSourceKey(root("agents").path, "shared-demo")].root, "agents");
   const policy = JSON.parse(await fs.readFile(join(process.env.DSH_HOME, "skills-manager/state.json"), "utf8"));
   assert.ok(policy.enabledSkills.agents.includes("shared-demo"));
-  assert.equal((await state()).roots.find(item => item.key === "agents").mutable, false, "general Shared Agent source stays read-only");
-  assert.equal((await deleteSkill(root("agents"), "shared-demo")).ok, false);
-  const deniedImport = await importUploadedSkill({ name: "blocked-demo", entries: [{ path: "SKILL.md", data: Buffer.from(doc("blocked-demo")).toString("base64") }] }, undefined, { root: root("agents") });
-  assert.equal(deniedImport.ok, false, "generic import cannot write an external root");
+  assert.equal((await state()).roots.find(item => item.key === "agents").mutable, true, "公共 Agent 统一开放文件管理");
+  const genericImport = await importUploadedSkill({ name: "generic-demo", entries: [{ path: "SKILL.md", data: Buffer.from(doc("generic-demo")).toString("base64") }] }, undefined, { root: root("agents") });
+  assert.notEqual(genericImport.ok, false, "普通导入无需安装入口特权");
+  const genericDeleted = await deleteSkill(root("agents"), "generic-demo");
+  assert.ok(genericDeleted.id, "普通技能无需来源记录即可删除");
+  await restoreTrash(genericDeleted.id);
+  assert.equal(await exists(join(root("agents").path, "generic-demo/SKILL.md")), true);
 
   archive = snapshot("v2");
   await manager.refresh({ id: repo.id });
@@ -93,8 +97,9 @@ try {
   finally { fs.rename = renameBeforeMove; }
   assert.equal((await skill("shared-demo")).canUninstall, true, "rolled-back uninstall restores ownership of the unchanged original");
 
-  const trashed = await manager.uninstall({ id: repo.id, path: "shared", root: "dsh", name: "unrelated" });
-  assert.equal(trashed.root.key, "agents", "uninstall ignores client-provided root/name");
+  await assert.rejects(manager.uninstall({ id: repo.id, path: "shared", root: "dsh" }), /安装记录/);
+  const trashed = await manager.uninstall({ id: repo.id, path: "shared", root: "agents", name: "unrelated" });
+  assert.equal(trashed.root.key, "agents", "uninstall uses selected root and ignores unrelated name");
   assert.equal(await exists(join(root("agents").path, "shared-demo")), false);
   assert.equal((await skill("shared-demo")).status, "available");
   assert.equal((await skill("shared-demo")).canUninstall, false);
@@ -106,7 +111,7 @@ try {
   await fs.writeFile(join(externalCopy, "external.txt"), "installed by another agent");
   assert.equal((await skill("shared-demo")).canUninstall, false, "a replacement does not inherit retired ownership");
   assert.equal((await skill("shared-demo")).tracked, false);
-  assert.equal((await manager.sources())["shared-demo"], undefined);
+  assert.equal((await manager.sources())[installationSourceKey(root("agents").path, "shared-demo")], undefined);
   await assert.rejects(manager.uninstall({ id: repo.id, path: "shared" }), /安装记录/);
   await assert.rejects(manager.preview({ id: repo.id, path: "shared" }), /安装记录/);
   await assert.rejects(manager.rollback({ id: repo.id, path: "shared", token: "stale" }), /安装记录/);
@@ -161,22 +166,22 @@ try {
     const installed = await manager.install({ id: repo.id, path, root: key });
     assert.equal(installed.root, destination.path);
     assert.equal((await skill(name)).installedRoot, key);
-    assert.equal((await manager.sources())[name].root, key);
-    if (key !== 'dsh') {
-      assert.equal((await state()).roots.find(item => item.key === key).mutable, false);
-      assert.equal((await deleteSkill(root(key), name)).ok, false, 'general external deletion remains denied');
-      const denied = await importUploadedSkill({ name: `untracked-${key}`, entries: [{ path: 'SKILL.md', data: Buffer.from(doc(`untracked-${key}`)).toString('base64') }] }, undefined, { root: root(key) });
-      assert.equal(denied.ok, false, 'generic import cannot write a repository-only destination');
+    assert.equal((await manager.sources())[installationSourceKey(root(key).path, name)].root, key);
+    assert.equal((await state()).roots.find(item => item.key === key).mutable, true, "两个用户级安装位置均开放普通管理");
+    for (const externalRoot of userRoots().filter(item => item.key !== "dsh" && item.key !== "agents")) {
+      assert.equal(externalRoot.mutable, false, "其他 Agent 来源仍只读");
+      assert.equal((await deleteSkill(externalRoot, name)).code, "error.root.readonly");
     }
     archive = snapshot('v2'); await manager.refresh({ id: repo.id });
     const preview = await manager.preview({ id: repo.id, path });
-    await manager.update({ id: repo.id, path, root: 'dsh', token: preview.token });
+    await manager.update({ id: repo.id, path, root: key, token: preview.token });
     assert.equal(await fs.readFile(join(installedPath, 'resources/help.txt'), 'utf8'), 'v2');
     const rollback = await manager.preview({ id: repo.id, path, rollback: true });
     await manager.rollback({ id: repo.id, path, token: rollback.token });
     assert.equal(await fs.readFile(join(installedPath, 'resources/help.txt'), 'utf8'), 'v1');
     await fs.writeFile(join(installedPath, 'local.txt'), 'preserve destination-local edits');
-    const trashed = await manager.uninstall({ id: repo.id, path, root: 'unknown-agent' });
+    await assert.rejects(manager.uninstall({ id: repo.id, path, root: 'unknown-agent' }), error => error.code === 'error.repo.invalid');
+    const trashed = await manager.uninstall({ id: repo.id, path, root: key });
     assert.equal(trashed.root.scope, 'user'); assert.equal(trashed.root.key, key);
     if (destination.localeKey) assert.equal(trashed.root.localeKey, destination.localeKey);
     assert.equal(await exists(installedPath), false);
@@ -192,7 +197,7 @@ try {
     await restoreTrash(trashed.id);
     assert.equal((await skill(name)).canUninstall, true);
     assert.equal(await fs.readFile(join(installedPath, 'local.txt'), 'utf8'), 'preserve destination-local edits');
-    assert.equal((await manager.sources())[name].root, key);
+    assert.equal((await manager.sources())[installationSourceKey(root(key).path, name)].root, key);
     const removedAgain = await manager.uninstall({ id: repo.id, path });
     await permanentlyDeleteTrash(removedAgain.id);
     assert.equal((await skill(name)).canUninstall, false);
@@ -202,8 +207,8 @@ try {
   assert.equal((await manager.list()).installRoots.find(item => item.key === "codex"), undefined);
   await assert.rejects(manager.install({ id: repo.id, path: "locations/codex", root: "codex" }), error => error.code === "error.repo.invalid");
   assert.equal(await exists(join(process.env.DSH_CODEX_HOME, "skills/location-codex")), false);
-  const forged = await deleteSkill({ ...root("claude"), path: outside, mutable: true }, "important", undefined, { allowRepositoryRoot: true });
-  assert.equal(forged.ok, false, "even internal opt-in only accepts the canonical Shared Agent path");
+  const forged = await deleteSkill({ ...root("claude"), path: outside, mutable: true }, "important", undefined);
+  assert.equal(forged.ok, false, "伪造可写标记和路径不能将只读 Agent 根变为可写目标");
 
   const legacy = await manager.install({ id: repo.id, path: "default" });
   assert.equal(legacy.root, root("dsh").path);
@@ -222,6 +227,9 @@ try {
   await fs.symlink(originalDshHome, linkedDshHome, directoryLinkType);
   process.env.DSH_HOME = linkedDshHome;
   try {
+    const destination = (await repositoryDestinations()).find(item => item.key === "dsh");
+    assert.equal(destination.available, false, "仓库目标拒绝祖先链接，但普通管理仍兼容迁移 Home");
+    await assert.rejects(manager.install({ id: repo.id, path: "default", root: "dsh" }), error => error.code === "error.root.unsafe", "仓库写入必须复用目标列表的祖先链接校验");
     const deleted = await deleteSkill(root("dsh"), "default-demo");
     assert.ok(deleted.id);
     const healthyRepositories = await fs.readFile(stateFile, "utf8");
@@ -251,7 +259,13 @@ try {
   const linkedHome = join(sandbox, "linked-home");
   await fs.symlink(outside, linkedHome, directoryLinkType);
   process.env.DSH_AGENTS_HOME = linkedHome;
-  try { await assert.rejects(manager.install({ id: repo.id, path: "blocked", root: "agents" })); }
+  try {
+    await assert.rejects(manager.install({ id: repo.id, path: "blocked", root: "agents" }), error => error.code === "error.root.unsafe" && error.params?.path === linkedHome);
+    const unsafeImport = await importUploadedSkill({ name: "generic-unsafe", entries: [{ path: "SKILL.md", data: Buffer.from(doc("generic-unsafe")).toString("base64") }] }, undefined, { root: root("agents") });
+    assert.equal(unsafeImport.code, "error.root.unsafe", "普通导入也拒绝祖先目录链接，不依赖安装标志");
+    assert.equal((await deleteSkill(root("agents"), "generic-unsafe")).code, "error.root.unsafe", "普通回收也拒绝祖先目录链接");
+    assert.equal(await exists(join(outside, "skills/generic-unsafe")), false);
+  }
   finally { process.env.DSH_AGENTS_HOME = safeAgentsHome; }
   assert.equal(await exists(join(outside, "skills/blocked-demo")), false);
 
@@ -275,12 +289,26 @@ try {
   assert.equal((await skill("default-demo")).canUninstall, false);
   await permanentlyDeleteTrash(retiredDefault.id);
   assert.equal((await skill("default-demo")).canUninstall, false, "permanent deletion is not a restore receipt");
-  assert.equal((await manager.sources())["default-demo"], undefined);
-  await assert.rejects(manager.uninstall({ id: repo.id, path: "default" }), /安装记录/);
-  await assert.rejects(manager.preview({ id: repo.id, path: "default" }), /安装记录/);
-  assert.deepEqual(await fs.readFile(join(identicalExternal, "SKILL.md")), Buffer.from(doc("default-demo")));
+  assert.equal((await manager.sources())[installationSourceKey(root("dsh").path, "default-demo")], undefined);
+    await assert.rejects(manager.uninstall({ id: repo.id, path: "default" }), /安装记录/);
+    await assert.rejects(manager.preview({ id: repo.id, path: "default" }), /安装记录/);
+    assert.deepEqual(await fs.readFile(join(identicalExternal, "SKILL.md")), Buffer.from(doc("default-demo")));
 
-  const validState = await fs.readFile(stateFile, "utf8");
+    if ((await skill("shared-demo")).canUninstall) {
+      const retiredAgents = await manager.uninstall({ id: repo.id, path: "shared", root: "agents" });
+      await permanentlyDeleteTrash(retiredAgents.id);
+    }
+    await manager.install({ id: repo.id, path: "shared", root: "dsh" });
+    const retiredDsh = await manager.uninstall({ id: repo.id, path: "shared", root: "dsh" });
+    await manager.install({ id: repo.id, path: "shared", root: "agents" });
+    const crossState = JSON.parse(await fs.readFile(stateFile, "utf8"));
+    assert.ok(crossState.installs.some(item => item.trashId === retiredDsh.id && (item.root || "dsh") === "dsh"), "安装到 Shared Agent 不能抹掉用户 DSH 的回收来源记录");
+    await restoreTrash(retiredDsh.id);
+    assert.equal(await exists(join(root("dsh").path, "shared-demo/SKILL.md")), true);
+    assert.equal(await exists(join(root("agents").path, "shared-demo/SKILL.md")), true, "恢复 DSH 副本不删除 Shared Agent 副本");
+    assert.equal((await manager.sources())[installationSourceKey(root("dsh").path, "shared-demo")].root, "dsh");
+
+    const validState = await fs.readFile(stateFile, "utf8");
   const invalidState = JSON.parse(validState);
   invalidState.installs[0].root = "../../outside";
   await fs.writeFile(stateFile, JSON.stringify(invalidState));

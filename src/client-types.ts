@@ -1,6 +1,7 @@
+import type { ClawHubPage, ClawHubSearchResponse } from './clawhub-catalog.js';
 import type * as React from 'react';
 import type { createRepositoryManager } from './repositories.js';
-import type { state, skillDetail, createSkill, listTrash } from './core.js';
+import type { state, skillDetail, createSkill, listTrash, listWorkspaces, workspaceSkills } from './core.js';
 import type { ImportResult } from './types.js';
 export type Translate = (key: string, params?: object) => string;
 type Success<T> = T extends {
@@ -11,11 +12,18 @@ export type Detail = Success<Awaited<ReturnType<typeof skillDetail>>>;
 export type TrashItem = Awaited<ReturnType<typeof listTrash>>[number];
 type Manager = ReturnType<typeof createRepositoryManager>;
 export type RepositoryRoutes = {
-    [K in keyof Manager as K extends 'sources' | 'list' | 'restoreTrash' ? never : `/repositories/${K}`]: Awaited<ReturnType<Manager[K]>>;
+    [K in keyof Manager as K extends 'sources' | 'list' | 'restoreTrash' | 'rememberCatalogInstall' | 'forgetCatalogInstall' | 'installCatalog' | 'trashSkill' | 'permanentlyDeleteTrash' ? never : `/repositories/${K}`]: Awaited<ReturnType<Manager[K]>>;
 };
-export type ApiRoutes = RepositoryRoutes & {
+type SkillsShSearchPath = `/skills-sh/search?q=${string}`;
+type SkillsShSearchResult = { skills: { id: string; source: string; skillId: string; name: string; installs?: number }[] };
+export type ApiRoutes = RepositoryRoutes & Record<SkillsShSearchPath, SkillsShSearchResult> & Record<`/clawhub/list?${string}`, ClawHubPage> & Record<`/clawhub/search?${string}`, ClawHubSearchResponse> & {
     '/repositories': Awaited<ReturnType<Manager['list']>>;
     '/state': ManagerSnapshot;
+    '/workspaces': { items: Awaited<ReturnType<typeof listWorkspaces>> };
+    '/workspace-skills': Success<Awaited<ReturnType<typeof workspaceSkills>>>;
+    '/import': ImportResult;
+    '/catalog/detail': { name: string; description: string; body: string; origin: string };
+    '/catalog/install': { name: string; root: string };
     '/detail': Detail;
     '/create': Success<Awaited<ReturnType<typeof createSkill>>>;
     '/upload': ImportResult;
@@ -26,6 +34,13 @@ export type ApiRoutes = RepositoryRoutes & {
     '/disable': unknown;
     '/source-enable': unknown;
     '/source-disable': unknown;
+    '/category-create': unknown;
+    '/category-rename': unknown;
+    '/category-delete': unknown;
+    '/category-assign': unknown;
+    '/category-move': unknown;
+    '/category-enable': unknown;
+    '/category-disable': unknown;
 };
 export type ApiCall = <K extends keyof ApiRoutes>(path: K, options?: RequestInit) => Promise<ApiRoutes[K]>;
 export interface ModalProps {
@@ -41,9 +56,10 @@ export interface SourceSelectProps {
     label: string;
     disabled?: boolean;
     action?: boolean;
+    icon?: React.ReactNode;
     options: {
         value: string;
-        label: string;
+        label: React.ReactNode;
         disabled?: boolean;
         danger?: boolean;
     }[];
@@ -81,6 +97,8 @@ export interface ClientContext {
     locale: {
         register: (namespace: string, dictionary: Record<string, Record<string, string>>) => () => void;
         bind: (namespace: string) => Translate;
+        /** Public LocaleRuntime snapshot: already resolves locale.preference. */
+        getLocale?: () => { active: string };
     };
     slots: {
         inject: (name: string, factory: () => unknown) => unknown;

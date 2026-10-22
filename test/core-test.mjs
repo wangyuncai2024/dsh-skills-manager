@@ -353,7 +353,7 @@ ok(
 ok(
   clientSource.includes('"root.ccswitch": "CC Switch"') &&
     clientSource.includes('"root.cursor": "Cursor"') &&
-    clientSource.includes('"root.copilot": "Copilot"') &&
+    clientSource.includes('"root.copilot": "GitHub Copilot"') &&
     clientSource.includes('"root.windsurf": "Windsurf"') &&
     clientSource.includes('"root.traeCn": "Trae CN"') &&
     clientSource.includes('"root.codebuddy": "CodeBuddy"') &&
@@ -364,8 +364,8 @@ ok(
   "settings panel localizes the CC Switch, Copilot, Cursor, and first-tier Agent sources in both dictionaries",
 );
 ok(
-  clientSource.includes('"aria-label": props.label'),
-  "category filter exposes an accessible label",
+  (await readFile(new URL("../src/source-select.ts", import.meta.url), "utf8")).includes('"aria-label": props.label'),
+  "筛选器在独立组件中提供可访问标签",
 );
 ok(
   (await readFile(new URL("../src/source-select.ts", import.meta.url), "utf8")).includes("popupMatchSelectWidth"),
@@ -413,12 +413,12 @@ ok(
 );
 ok(
   clientSource.includes("function submitImport()") &&
-    clientSource.includes('post("/upload", payload'),
+    clientSource.includes('post("/upload", Object.assign({}, payload, destinationPayload('),
   "upload import uses the shared guarded mutation path",
 );
 ok(
   clientSource.includes("function submitCreate()") &&
-    clientSource.includes('post("/create", form'),
+    clientSource.includes('post("/create", Object.assign({}, form,'),
   "create uses the shared guarded mutation path",
 );
 ok(
@@ -631,6 +631,49 @@ eq(
   "parseSkillDoc removes common block indentation",
 );
 
+// 显式缩进只剥离指定数量的空格，而不是内容的最小缩进。
+for (const header of ["|2", "|2-", "|-2", "|2+", "|+2"]) {
+  const explicitLiteral = parseSkillDoc(
+    `---\ndescription: ${header}\n    First line.\n      Second line.\nname: explicit\n---\nbody`,
+  );
+  eq(
+    explicitLiteral.map.description,
+    "  First line.\n    Second line.",
+    `parseSkillDoc honors explicit literal indentation: ${header}`,
+  );
+  eq(explicitLiteral.map.name, "explicit", `${header} stops at the next field`);
+  eq(explicitLiteral.body, "body", `${header} preserves the body`);
+  eq(explicitLiteral.fields[0].raw, header, `${header} preserves the raw header`);
+}
+for (const header of [">2", ">2-", ">-2", ">2+", ">+2"]) {
+  const explicitFolded = parseSkillDoc(
+    `---\ndescription: ${header}\n  First line.\n  Second line.\n---\nbody`,
+  );
+  eq(
+    explicitFolded.map.description,
+    "First line. Second line.",
+    `parseSkillDoc retains folded display semantics: ${header}`,
+  );
+}
+for (const indentation of [1, 9]) {
+  const explicitBoundary = parseSkillDoc(
+    `---\ndescription: |${indentation}\n${" ".repeat(indentation + 2)}First line.\n${" ".repeat(indentation + 4)}Second line.\n---\nbody`,
+  );
+  eq(
+    explicitBoundary.map.description,
+    "  First line.\n    Second line.",
+    `parseSkillDoc supports indentation indicator ${indentation}`,
+  );
+}
+const explicitSecondLine = parseSkillDoc(
+  "---\ndescription: |2\n  First line.\n    Second line.\n---\nbody",
+);
+eq(
+  explicitSecondLine.map.description,
+  "First line.\n  Second line.",
+  "parseSkillDoc preserves extra indentation on the second literal line",
+);
+
 // ── 启用 / 停用 ──
 const goodSkillSource =
   "---\nname: good-skill\ndescription: A good skill.\n---\nbody";
@@ -775,6 +818,31 @@ eq(
   "structurally incomplete toggle carries the notLoadable code",
 );
 await makeSkill(
+  dshRoot,
+  "skill-scan",
+  "---\nname: SkillScan\ndescription: Security gate for skills.\n---\nbody\n",
+);
+const titledToggle = await setSkillEnabled(dshRoot, "skill-scan", true);
+ok(
+  titledToggle.ok !== false && titledToggle.enabled === true,
+  "frontmatter title SkillScan can be enabled under its kebab folder name",
+);
+const titledState = await state();
+const titledSkill = titledState.roots.flatMap((root) => root.skills || []).find((skill) => skill.name === "skill-scan");
+ok(titledSkill && titledSkill.loadable !== false, "a title-case frontmatter name does not make the installed skill invalid");
+// 同一声明名不因嵌套路径变化；候选名称必须满足宿主 kebab-case 契约。
+for (const name of ["nested-title-scan", "team/nested-title-scan"]) {
+  await makeSkill(codexRoot, name, "---\nname: NestedTitleScan\ndescription: 嵌套标题名回归。\n---\n正文\n");
+}
+const nestedTitleSkills = (await state()).roots.flatMap(root => root.skills || []).filter(skill => skill.declaredName === "NestedTitleScan");
+eq(nestedTitleSkills.filter(skill => skill.winner).length, 1, "嵌套与顶层的同声明名只产生一个 winner");
+eq(nestedTitleSkills.find(skill => skill.winner)?.canonicalName, "nested-title-scan", "嵌套路径不改变 winner 的规整调用名");
+ok(nestedTitleSkills.some(skill => skill.shadowedBy?.name === "nested-title-scan"), "嵌套副本遵循同名遮蔽规则");
+const nestedTitleCandidates = (await listProviderCandidates()).filter(candidate => candidate.locator?.entryName?.includes("nested-title-scan"));
+eq(nestedTitleCandidates.length, 1, "provider 将嵌套同名技能合并为单个候选");
+ok(nestedTitleCandidates.every(candidate => candidate.name === "nested-title-scan"), "provider 不返回宿主拒绝的大写名称");
+for (const name of ["nested-title-scan", "team/nested-title-scan"]) await rm(join(codexRoot, name), { recursive: true });
+await makeSkill(
   agentsRoot,
   "public-skill",
   "---\nname: public-skill\ndescription: Public skill.\n---\nbody",
@@ -885,6 +953,23 @@ ok(
   "disabled Cursor source does not contribute a shadowing candidate",
 );
 await setSourceEnabled("cursor", true);
+
+await setSourceEnabled("dsh", false);
+const disabledDshSource = (await listProviderCandidates()).find(
+  (item) => item.source === "user-dsh",
+);
+ok(
+  disabledDshSource &&
+    disabledDshSource.invocation.userInvocable === false,
+  "DSH source supports manager-local source disable",
+);
+const dshRootViewDisabled = (await state()).roots.find((r) => r.key === "dsh");
+ok(dshRootViewDisabled && dshRootViewDisabled.enabled === false, "dsh root view reports disabled");
+ok((await readManagerState()).state.sources.dsh === false, "sources.dsh is written to state.json");
+await setSourceEnabled("dsh", true);
+const dshRootViewEnabled = (await state()).roots.find((r) => r.key === "dsh");
+ok(dshRootViewEnabled && dshRootViewEnabled.enabled === true, "dsh root view reports enabled");
+ok((await readManagerState()).state.sources.dsh === true, "sources.dsh restore works");
 
 // CC Switch 以固定 SSOT 保存技能，并把顶层技能目录链接到各 Agent 来源。
 const ccswitchSkill = await makeSkill(
@@ -1341,9 +1426,12 @@ ok(
 );
 await setSourceEnabled("codex", false);
 providerCandidates = await listProviderCandidates();
+const disabledExternalCandidate = providerCandidates.find((item) => item.name === "code-review");
 ok(
-  !providerCandidates.some((item) => item.name === "code-review"),
-  "source disable omits external candidates",
+  disabledExternalCandidate &&
+    disabledExternalCandidate.invocation.modelInvocable === false &&
+    disabledExternalCandidate.invocation.userInvocable === false,
+  "关闭外部来源仍保留已有的显式单技能阻断",
 );
 await setSourceEnabled("codex", true);
 
@@ -1485,7 +1573,8 @@ ok(
   "permanent trash deletion removes the second-stage entry",
 );
 const publicDelete = await deleteSkill(agentsRoot, "public-skill");
-ok(publicDelete.ok === false, "deleteSkill rejects public Agent directory");
+ok(!!publicDelete.id, "公共 Agent 普通技能允许移入回收站");
+await restoreTrash(publicDelete.id);
 
 // Windows 可能在 stage 内容刚写完时持续阻止目录 rename；最终发布应降级复制，不能把成功的搬运回滚掉。
 await makeSkill(
@@ -1770,19 +1859,10 @@ if (await tryLink(process.env.DSH_HOME, aliasHome, linkType)) {
     "intermediate-link overlap test skipped because this environment cannot create directory links",
   );
 }
-eq(
-  publicDelete.code,
-  "error.root.readonly",
-  "public delete carries the readonly code",
-);
-eq(
-  publicDelete.params && publicDelete.params.action,
-  "delete",
-  "public delete params.action",
-);
+ok(!!publicDelete.id, "公共 Agent 回收返回有效条目编号");
 ok(
   (await resolveEntry(agentsRoot, "public-skill")) !== null,
-  "public skill remains after rejected delete",
+  "公共 Agent 技能恢复后保留原内容",
 );
 await writeFile(
   join(dshRoot, "SKILL.md"),
@@ -2585,6 +2665,7 @@ applyHost({
     emitted.push(Array.from(arguments));
   },
   get(name) {
+    if (name === "workspaceRegistry") return { list: () => [{ path: routeProjectNested }] };
     if (name === "sessions") {
       return {
         list() {
@@ -3428,11 +3509,11 @@ try {
     headers: secureHeaders,
     body: JSON.stringify({ name: "http-skill", root: "agents" }),
   });
-  eq(httpDeleteAgents.status, 400, "HTTP delete rejects public Agent root");
+  eq(httpDeleteAgents.status, 400, "Shared Agent 中不存在的技能返回失败");
   eq(
     (await httpDeleteAgents.json()).code,
-    "error.root.readonly",
-    "HTTP delete with agents root is readonly",
+    "error.skill.notFound",
+    "Shared Agent 中不存在的技能不再误报只读",
   );
   ok(
     (await resolveEntry(dshRoot, "http-skill")) !== null,
@@ -3545,8 +3626,8 @@ ok(
 );
 const agentsSnap = snap.roots.find((r) => r.key === "agents");
 ok(
-  agentsSnap.mutable === false,
-  "public Agent root disallows destructive actions",
+  agentsSnap.mutable === true,
+  "公共 Agent 根开放普通文件管理",
 );
 ok(
   agentsSnap.skills.some((s) => s.name === "public-skill"),
@@ -3681,18 +3762,23 @@ eq(
 );
 eq(
   (await restoreTrash(directProjectDeleted.id, null, { projectCwds: [] })).code,
+  "error.workspace.unregistered",
+  "project restore passes through an unregistered workspace instead of the old session error",
+);
+eq(
+  (await restoreTrash(directProjectDeleted.id, null, { projectCwds: [], registeredWorkspaces: [routeProjectNested] })).code,
   "error.trash.projectUnavailable",
-  "project restore waits until the original project is an active Session workspace",
+  "project restore refuses a registered project that is not in the active session",
 );
 const directProjectRestored = await restoreTrash(
   directProjectDeleted.id,
   null,
-  { projectCwds: [routeProjectNested] },
+  { registeredWorkspaces: [routeProjectNested] },
 );
 eq(
   directProjectRestored.root.key,
   writableProjectDefinition.key,
-  "project restore resolves the original root from current active Session cwd values",
+  "project restore resolves the original root from real registered paths",
 );
 ok(
   (await resolveEntry(
@@ -4026,6 +4112,11 @@ eq(
 ok(
   registeredTool && registeredTool.name === "create_skill",
   "host registers the conversational create_skill tool",
+);
+eq(
+  registeredTool.output.render(null, { ok: false, code: "error.skill.exists", error: "技能已存在: foo", params: { name: "foo" } })[0].text.includes("技能"),
+  false,
+  "create_skill failure card must not embed the Chinese error text",
 );
 
 // 同名候选必须经过上游真实的层内排序与跨层合并，单测候选数量无法证明运行时来源正确。

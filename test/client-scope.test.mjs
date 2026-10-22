@@ -31,6 +31,10 @@ const react = {
 };
 const skill = (name) => ({ name, description: "LONG_DESCRIPTION_" + name, enabled: true, loadable: true });
 const data = {
+  writeDestinations: [
+    { key: "dsh", path: "C:/u/.dsh/skills", label: "DSH", available: true },
+    { key: "agents", path: "C:/u/.agents/skills", label: "Shared", available: true },
+  ],
   projects: [{ root: "/a", name: "A" }, { root: "/b", name: "B" }], trash: [],
   roots: [
     { key: "dsh", mutable: true, skills: [skill("global-one")] },
@@ -47,7 +51,7 @@ function sessionData(options) {
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (_, options) => ({ ok: true, json: async () => ({ data: sessionData(options) }) });
 try {
-  new Function("window", await readFile(new URL("../lib/client.js", import.meta.url), "utf8"))({ __ModuleLoader__: { load(value) { definition = value; } } });
+  new Function("window", await readFile(process.env.DSH_CLIENT_TEST_BUNDLE || new URL("../lib/client.js", import.meta.url), "utf8"))({ __ModuleLoader__: { load(value) { definition = value; } } });
   const client = definition.factory((id) => {
     if (id === "react") return react;
     if (id === "react/jsx-runtime") return { jsx: react.createElement, jsxs: react.createElement, Fragment: react.Fragment };
@@ -81,6 +85,8 @@ try {
     // 筛选业务测试只驱动受控值；官方菜单交互由专用测试与真实浏览器验证。
     if (typeof node.type === "function" && Array.isArray(node.props?.options) && node.props.label && node.props.onChange) return [{ type: "select-fixture", props: { "aria-label": node.props.label, options: node.props.options, onChange: (event) => node.props.onChange(event?.target ? event.target.value : event) }, children: [] }];
     if (node.type?.name === "SkillSwitch" || node.props?.closeLabel || (typeof node.type === "function" && node.props && "on" in node.props && typeof node.props.label === "string")) return nodes(node.type({ ...node.props, children: node.children }));
+    // 目标选择器是普通函数组件：渲染出它的子树，才能断言其中的控件。
+    if (typeof node.type === "function" && node.props && "userDestinations" in node.props) return nodes(node.type(node.props));
     const nested = linkedNodes(node.children);
     if (typeof node.type === "function") {
       linkedNodes(node.props?.header, nested);
@@ -113,7 +119,10 @@ try {
   assert.ok(skillActions.every((node) => node.children.at(-1)?.props?.className === "dssm-row-state"), "技能开关在行的最右边");
   assert.equal(nodes().some((node) => node.props.className === "dssm-status dssm-enabled"), false, "启用状态由开关表示，不再重复文案");
   const more = find((node) => node.props["aria-label"] === t("btn.more"));
-  assert.ok(more.props.options.some((option) => option.value === "trash" && option.danger), "可写技能的更多菜单提供回收入口");
+  assert.ok(more.props.options.some((option) => option.value === "detail"), "查看详情放进更多");
+  assert.ok(more.props.options.some((option) => option.value === "trash" && option.danger), "删除技能放进更多");
+  assert.equal(nodes().some((node) => node.props["aria-label"] === t("btn.detail") && node.props.icon), false, "技能行不再单独放详情图标");
+  assert.equal(nodes().some((node) => node.props["aria-label"] === t("btn.trash") && node.props.icon), false, "技能行不再单独放删除图标");
   more.props.onChange({ target: { value: "trash" } }); render();
   assert.ok(find((node) => node.props.title === t("confirm.trash.title")), "回收菜单仍先打开确认弹窗");
   find((node) => node.children.includes(t("btn.cancel"))).props.onClick(); render();
@@ -122,83 +131,7 @@ try {
   assert.deepEqual(rows(), ["global-two"], "来源可独立折叠");
   change(t("search"), "two");
   assert.deepEqual(rows(), ["global-two"]);
-  tab("项目技能");
-  assert.equal(find((node) => node.props["aria-label"] === "选择项目"), undefined, "没有项目选择框");
-  assert.deepEqual(rows(), [], "项目来源默认折叠");
-  assert.equal(groups().length, 2, "空的可写项目来源保留分组入口");
-  expandAll();
-  assert.deepEqual(rows(), ["project-a"]);
-  change(t("filter.source"), "a-copilot");
-  assert.ok(
-    find((node) => String(node.props["aria-label"] || "").includes(t("source.toggle"))),
-    "项目 Tab 选中只读来源时显示来源开关",
-  );
-  change(t("filter.source"), "a-dsh");
-  assert.equal(
-    find((node) => String(node.props["aria-label"] || "").includes(t("source.toggle"))),
-    undefined,
-    "项目 DSH 不显示来源总开关",
-  );
-  change(t("filter.source"), "");
-  change(t("search"), "not-found");
-  assert.deepEqual(rows(), []);
-  await selectSession("session-b");
-  assert.deepEqual(rows(), [], "项目展开状态独立");
-  expandAll();
-  assert.deepEqual(rows(), ["project-b"], "不同项目保存独立筛选");
-  tab("全局技能");
-  assert.deepEqual(rows(), ["global-two"], "返回全局保留搜索");
-  tab("项目技能");
-  await selectSession("session-a");
-  assert.deepEqual(rows(), [], "返回原项目保留搜索");
-  change(t("search"), "");
-  const projectCopy = data.roots.find((r) => r.key === "a-copilot").skills[0];
-  projectCopy.shadowedBy = { root: "a-dsh", name: "project-a" };
-  render();
-  const shadowedSwitch = find((node) => node.props["aria-label"] === t("skill.toggle") + " project-a");
-  assert.equal(shadowedSwitch.props.disabled, false, "被覆盖副本仍允许独立设置启停");
   let toggleRequest;
-  globalThis.fetch = async (url, options) => {
-    if (options?.method === "POST") toggleRequest = { url, body: JSON.parse(options.body) };
-    return { ok: true, json: async () => ({ data: sessionData(options) }) };
-  };
-  shadowedSwitch.props.onChange();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(toggleRequest.url.endsWith("/disable"));
-  assert.deepEqual(toggleRequest.body, { root: "a-copilot", name: "project-a" }, "只停用对应来源，不修改赢家策略");
-  render();
-  const operationFeedback = () => find((node) => node.props.className === "dssm-feedback" && node.children.includes(t("result.updated")));
-  assert.ok(operationFeedback(), "操作结果显示在发起操作的页面");
-  tab("技能仓库");
-  assert.equal(operationFeedback(), undefined, "仓库页不显示其他页面的操作结果");
-  tab("回收站");
-  assert.equal(operationFeedback(), undefined, "回收站不显示技能页的操作结果");
-  tab("项目技能");
-  let completePendingToggle;
-  const fetchBeforePending = globalThis.fetch;
-  globalThis.fetch = async (url, options) => {
-    if (options?.method === "POST" && url.endsWith("/disable")) await new Promise((resolve) => { completePendingToggle = resolve; });
-    return fetchBeforePending(url, options);
-  };
-  find((node) => node.props["aria-label"] === t("skill.toggle") + " project-a").props.onChange();
-  tab("技能仓库");
-  completePendingToggle(); await new Promise((resolve) => setImmediate(resolve)); render();
-  assert.equal(operationFeedback(), undefined, "操作在切换页签后完成也不能污染仓库提示");
-  globalThis.fetch = fetchBeforePending;
-  tab("项目技能");
-  delete projectCopy.shadowedBy;
-  projectCopy.enabled = false;
-  projectCopy.fallbackTo = { root: "copilot", name: "project-a", scope: "user" };
-  render();
-  assert.ok(find((node) => node.props.className === "dssm-note dssm-fallback" && node.children.includes("当前使用全局 Copilot 副本。")), "项目停用行显示全局接管来源");
-  assert.equal(find((node) => node.props["aria-label"] === t("skill.toggle") + " project-a").props.checked, false, "提示不改变副本的停用状态");
-  projectCopy.fallbackTo = { root: "a-dsh", name: "project-a", scope: "project" };
-  render();
-  assert.ok(find((node) => node.props.className === "dssm-note dssm-fallback" && String(node.children[0]).includes("当前使用项目")));
-  delete projectCopy.fallbackTo;
-  render();
-  assert.equal(find((node) => node.props.className === "dssm-note dssm-fallback"), undefined, "无接管来源时不显示提示");
-  projectCopy.enabled = true;
   render();
   assert.equal(find((node) => node.props?.block === true).props.options.length, 4, "仓库、回收站与两个技能视图同级");
   data.trash.push(
@@ -220,17 +153,17 @@ try {
   assert.equal(find((node) => node.props.role === "tabpanel").props["aria-labelledby"], "dssm-tab-trash");
   const trashTab = find((node) => node.props?.block === true).props.options.find((item) => item.value === "trash");
   assert.equal([].concat(trashTab.label).find((node) => node?.props?.className === "dssm-trash-count").children[0], 2);
-  find((node) => node.children.includes(t("btn.restore"))).props.onClick();
+  find((node) => node.props["aria-label"] === t("btn.restore")).props.onClick();
   await new Promise((resolve) => setImmediate(resolve)); render();
   assert.ok(toggleRequest.url.endsWith("/trash-restore"));
   assert.deepEqual(toggleRequest.body, { id: "trash-a" });
   assert.deepEqual(rows(), ["removed-b"]);
-  find((node) => node.children.includes(t("btn.delete.forever"))).props.onClick(); render();
+  find((node) => node.props["aria-label"] === t("btn.delete.forever")).props.onClick(); render();
   assert.ok(find((node) => node.props.title === t("confirm.delete.title")), "永久删除仍需确认");
   find((node) => node.children.includes(t("btn.cancel"))).props.onClick(); render();
   assert.equal(find((node) => node.props.title === t("confirm.delete.title")), undefined, "取消后留在回收站 Tab");
   assert.deepEqual(rows(), ["removed-b"]);
-  find((node) => node.children.includes(t("btn.delete.forever"))).props.onClick(); render();
+  find((node) => node.props["aria-label"] === t("btn.delete.forever")).props.onClick(); render();
   nodes().filter((node) => node.children.includes(t("btn.delete.forever"))).at(-1).props.onClick();
   await new Promise((resolve) => setImmediate(resolve)); render();
   assert.ok(toggleRequest.url.endsWith("/trash-delete"));
@@ -240,26 +173,38 @@ try {
   assert.equal(find((node) => node.props.className === "dssm-trash-count"), undefined, "空回收站不显示数量徽标");
   tab("全局技能");
   assert.deepEqual(rows(), ["global-two"], "经过回收站仍保留全局筛选");
-  tab("项目技能");
-  assert.deepEqual(rows(), ["project-a"], "经过回收站仍保留所选项目与筛选");
-  const create = find((node) => node.children.includes(t("btn.create")));
-  assert.equal(create.props.disabled, false, "项目页仍可创建全局技能");
-  create.props.onClick(); render();
-  assert.equal(find((node) => node.props["aria-label"] === t("create.target")), undefined, "创建位置没有下拉框");
-  assert.ok(find((node) => node.props.className === "dssm-detail-path" && node.children.includes(t("create.globalTarget"))), "创建位置固定展示全局 DSH");
+  const create = find((node) => node.props["aria-label"] === t("btn.create"));
+  assert.equal(create.props.disabled, false, "全局页可创建技能");
+  create.props.onClick(); await new Promise((resolve) => setImmediate(resolve)); render();
+  assert.ok(find((node) => node.props["aria-label"] === t("dest.scope")), "创建弹窗使用共用的范围选择器");
+  assert.equal(find((node) => node.props["aria-label"] === t("dest.workspace")), undefined, "默认用户目录，不出现工作区下拉");
+  const locationFixture = () => find((node) => node.props["aria-label"] === t("dest.location"));
+  assert.deepEqual(locationFixture().props.options.map((o) => [o.value, o.disabled === true]), [["dsh", false], ["agents", false]], "创建开放 Shared Agent，位置是下拉");
+  assert.ok(nodes().some((node) => node.type === "code" && node.children.includes("C:/u/.dsh/skills")), "路径只显示所选位置的后端校验路径");
+  assert.equal(nodes().some((node) => node.type === "input" && node.props.type === "radio"), false, "不再使用单选框");
   for (const [key, value] of [["name", "new-global"], ["description", "description"], ["body", "body"]]) {
     find((node) => node.props.placeholder === t("create." + key + ".placeholder")).props.onChange({ target: { value } }); render();
   }
   nodes().filter((node) => node.children.includes(t("btn.create.now"))).at(-1).props.onClick();
   await new Promise((resolve) => setImmediate(resolve)); render();
   assert.ok(toggleRequest.url.endsWith("/create"));
-  assert.equal(toggleRequest.body.root, "dsh", "项目页创建也只提交全局 DSH 目标");
-  create.props.onClick(); render();
+  assert.equal(toggleRequest.body.root, "dsh", "默认仍提交全局 DSH");
+  assert.equal("workspace" in toggleRequest.body, false, "用户目录不带 workspace");
+  create.props.onClick(); await new Promise((resolve) => setImmediate(resolve)); render();
+  locationFixture().props.onChange({ target: { value: "agents" } }); render();
+  assert.ok(nodes().some((node) => node.type === "code" && node.children.includes("C:/u/.agents/skills")), "切到 Shared Agent 后路径跟着变");
+  for (const [key, value] of [["name", "new-agents"], ["description", "description"], ["body", "body"]]) {
+    find((node) => node.props.placeholder === t("create." + key + ".placeholder")).props.onChange({ target: { value } }); render();
+  }
+  nodes().filter((node) => node.children.includes(t("btn.create.now"))).at(-1).props.onClick();
+  await new Promise((resolve) => setImmediate(resolve)); render();
+  assert.equal(toggleRequest.body.root, "agents", "选 Shared Agent 提交 root=agents");
+  assert.equal("workspace" in toggleRequest.body, false);
+  create.props.onClick(); await new Promise((resolve) => setImmediate(resolve)); render();
+  find((node) => node.props["aria-label"] === t("dest.scope")).props.onChange({ target: { value: "workspace" } }); render();
+  assert.equal(nodes().filter((node) => node.children.includes(t("btn.create.now"))).at(-1).props.disabled, true, "这个夹具没有工作区列表，切到工作区后不能创建");
   await selectSession(undefined);
-  assert.equal(find((node) => node.props.title === t("create.title")), undefined, "会话切换关闭旧项目创建表单");
-  assert.equal(groups().length, 0, "无当前会话不回退其他项目");
-  assert.ok(find((node) => node.children.includes(t("project.empty"))), "无当前项目显示空状态");
-  assert.equal(find((node) => node.children.includes(t("btn.create"))).props.disabled, false, "无当前项目仍可创建全局技能");
+  assert.equal(find((node) => node.props.title === t("create.title")), undefined, "会话切换关闭旧创建表单");
   let resolveOld;
   globalThis.fetch = async (_, options) => {
     const snapshot = { data: sessionData(options) };
@@ -268,10 +213,9 @@ try {
   };
   await selectSession("session-a");
   await selectSession("session-b");
-  assert.ok(rows().includes("project-b"));
   resolveOld(); await new Promise((resolve) => setImmediate(resolve)); render();
-  assert.ok(rows().includes("project-b") && !rows().includes("project-a"), "旧会话的慢响应不会覆盖当前会话");
-  console.log("当前会话绑定、Tab、项目隔离、筛选记忆和创建目标交互回归通过");
+  assert.ok(find((node) => node.props.className === "dssm-source"), "旧会话的慢响应不会让页面崩溃");
+  console.log("全局页 Tab、筛选记忆、会话重挂载和创建目标交互回归通过");
 
   snapshotFor = (id) => id
     ? { ids: [id], byId: { [id]: { retainedBy: { mainView: 1 } } } }
@@ -283,13 +227,14 @@ try {
   globalThis.fetch = async (_, options) => ({ ok: true, json: async () => ({ data: sessionData(options) }) });
   render(); effects.splice(0).forEach((effect) => effect());
   await new Promise((resolve) => setImmediate(resolve)); render();
-  tab("项目技能");
+  // 项目页不再依赖会话是否被主视图保留：全局页在 alpha.2 的会话形态下照常工作。
+  assert.deepEqual(rows(), [], "alpha.2 会话形态下全局来源默认折叠");
   expandAll();
-  assert.deepEqual(rows(), ["project-a"], "alpha.2 主视图保留会话能打开项目技能");
+  assert.ok(rows().length > 0, "alpha.2 会话形态下全局技能照常展示");
   await selectSession("session-b");
   expandAll();
-  assert.deepEqual(rows(), ["project-b"], "alpha.2 切换主视图会话后项目技能跟着变");
+  assert.ok(rows().length > 0, "alpha.2 切换主视图会话后全局页仍可用");
   await selectSession(undefined);
-  assert.ok(find((node) => node.children.includes(t("project.empty"))), "alpha.2 没有主视图会话时项目页为空");
-  console.log("alpha.2 retainedBy.mainView 会话绑定通过");
+  assert.ok(find((node) => node.props.className === "dssm-source"), "alpha.2 没有会话时全局页仍可用");
+  console.log("alpha.2 retainedBy.mainView 会话形态通过");
 } finally { globalThis.fetch = originalFetch; }

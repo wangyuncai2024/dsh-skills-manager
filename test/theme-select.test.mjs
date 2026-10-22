@@ -33,4 +33,9 @@ assert.ok(source.includes('className: "dssm-row-state"'), "状态与开关必须
 assert.ok(!source.includes("dsh-client-ui-primitives"), "设置页不再依赖宿主界面组件");
 const updater = await readFile(new URL("../src/plugin-update-ui.ts", import.meta.url), "utf8");
 assert.ok(updater.includes("handlePluginUpdateEscape"), "更新弹窗仍拦截 Escape");
+assert.match(
+  source,
+  /\.dssm-source\{[^}]*background:transparent/,
+  "来源卡片背景与技能列表一致，透出页面底色，不再另铺 layer-2",
+);
 console.log("Ant Design 筛选与残留样式检查通过");
